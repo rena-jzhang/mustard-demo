@@ -1,0 +1,19 @@
+name: mustard
+dependencies:
+  - pip:
+    - jsonlines==1.2.0
+    - overrides==1.9
+  - cudatoolkit
+  - ffmpeg
+  - h5py
+  - conda-forge::librosa=0.6.2 # Keep specific version due to known issue
+  - nltk
+  - numba  # See https://github.com/librosa/librosa/issues/1160#issuecomment-643068317
+  - numpy
+  - pillow
+  - pip
+  - python=3.7
+  - pytorch::pytorch
+  - scikit-learn
+  - pytorch::torchvision
+  - tqdm
