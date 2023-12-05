@@ -19,7 +19,7 @@ def pickle_loader(filename: str) -> Any:
     with open(filename, "rb") as file:
         return pickle.load(file, encoding="latin1")
 
-class DataLoader:
+class DataPreper:
     DATA_PATH = "data/sarcasm_data.json"
     AUDIO_PICKLE = "data/audio_features.p"
     INDICES_FILE = "data/split_indices.p"
@@ -159,7 +159,7 @@ class DataHelper:
 
     def __init__(self, train_input: Sequence[Tuple[Any, ...]], train_output: Sequence[int],
                  test_input: Sequence[Tuple[Any, ...]], test_output: Sequence[int], config: config.Config,
-                 data_loader: DataLoader) -> None:
+                 data_loader: DataPreper) -> None:
         self.data_loader = data_loader
         self.config = config
         self.train_input = train_input
