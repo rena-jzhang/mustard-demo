@@ -9,6 +9,7 @@ import h5py
 import jsonlines
 import nltk
 import numpy as np
+from torch.utils.data import Dataset
 
 import config
 
@@ -18,7 +19,24 @@ CLS_TOKEN_INDEX = 0
 def pickle_loader(filename: str) -> Any:
     with open(filename, "rb") as file:
         return pickle.load(file, encoding="latin1")
+    
+    
+class CustomDataset(Dataset):
+    def __init__(self, features, labels):
+        self.text_features = features['text']
+        self.video_features = features['video']
+        self.audio_features = features['audio']
+        self.labels = labels
 
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        text = self.text_features[idx]
+        video = self.video_features[idx]
+        audio = self.audio_features[idx]
+        label = self.labels[idx]
+        return text, video, audio, label
 class DataPreper:
     DATA_PATH = "data/sarcasm_data.json"
     AUDIO_PICKLE = "data/audio_features.p"
