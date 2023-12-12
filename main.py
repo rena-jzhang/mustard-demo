@@ -20,12 +20,98 @@ from utils import gpu_monitor, save_checkpoint, prompt_eng
 
 
 # LM_VERSION = 'google/flan-t5-xxl'
-LM_VERSION = 't5-small'
+LM_VERSION = 't5-large'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-LR = 1e-4
+LR = 1e-3
 seed = 42
 torch.manual_seed(seed)
+
+class MyCustomDataset(Dataset):
+    def __init__(self, data_input, data_output, dataset_name, task_type, tokenizer):
+        self.dataset_name = dataset_name
+        self.task_type = task_type
+        self.data = {'text': [], 'audio': [], 'video': []}
+        self.labels = []
+
+        # Preprocess and tokenize all text data at once
+        prompt_eng_texts = [self._preprocess(item[0], self.dataset_name, self.task_type) for item in data_input]
+        tokenized_texts = tokenizer(prompt_eng_texts, return_tensors="pt", padding=True, truncation=True).input_ids
+
+        # Assuming audio_features and video_features_file are in a format ready to be converted to tensors
+        audio_features = [item[4] for item in data_input]
+        audio_tensor_list = [torch.tensor(features).permute(1, 0).mean(dim=0).unsqueeze(0) for features in audio_features]
+        video_features_files = [item[5] for item in data_input]
+        video_tensor_list = [torch.tensor(features).mean(dim=0).unsqueeze(0) for features in video_features_files]
+
+        # Convert lists to tensors
+        self.data = {
+            'text': tokenized_texts, # a 2d tensor
+            # 'audio': pad_sequence(audio_tensor_list, batch_first=True, padding_value=0), # list of 2d tensors
+            'audio': audio_tensor_list,
+            # 'video':  pad_sequence(video_tensor_list, batch_first=True, padding_value=0)# list of 2d tensors
+            'video': video_tensor_list
+        }
+        
+        # Process labels
+        processed_labels = [self._process_output(label, self.dataset_name, self.task_type) for label in data_output]
+        self.labels = tokenizer(processed_labels, return_tensors="pt", padding=True, truncation=True).input_ids
+
+    def _preprocess(self, text, dataset_name, task_type):
+        # Define your preprocessing steps here
+        
+        template = "Examine the input and categorize it as 'Sarcastic' or 'Non-Sarcastic' in the context of binary sarcasm detection: "
+        return f"{template} {text}"
+        
+    
+    def _process_output(self, label, dataset_name, task_type):
+        
+        sarcasm_mapping = {
+        0: "Non-Sarcastic",
+        1: "Sarcastic"
+        }
+        return sarcasm_mapping[label]
+    
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        label = self.labels[idx]
+
+        feature = {}
+        for mod in self.data.keys():
+            feature[mod] = self.data[mod][idx]
+
+        # return text, feature, label, self.dataset_name, self.task_type
+        return feature, label, self.dataset_name, self.task_type
+
+def custom_collate_fn(batch):
+    # Initialize containers for batched data and labels
+    batched_data = {}
+    labels = []
+    dataset_names = []
+    task_types = []
+
+    # Assuming all items in the batch have the same keys
+    modalities = batch[0][0].keys()  # Keys from the first item's data
+
+    for modality in modalities:
+        # Extract features for each modality and pad if necessary
+        features = [item[0][modality] for item in batch]
+
+        if modality in ['audio', 'video']:  # Add other modalities requiring padding here
+            batched_data[modality] = pad_sequence(features, batch_first=True, padding_value=0)
+        else:  # For modalities that don't need padding
+            batched_data[modality] = torch.stack(features, dim=0)
+
+    # Process labels, dataset names, and task types
+    labels = [item[1] for item in batch]
+    dataset_names = [item[2] for item in batch]
+    task_types = [item[3] for item in batch]
+
+    labels_tensor = torch.stack(labels, dim=0)
+
+    return batched_data, labels_tensor, dataset_names, task_types
 
 class TextFeatureOPTModel(nn.Module):
     def __init__(self, model_name, feature_types, tokenizer, feature_modes):
@@ -85,7 +171,7 @@ class TextFeatureOPTModel(nn.Module):
         # Process non-text features
         feature_inputs = []
         for i, feature_type in enumerate(self.feature_types):
-            # print(feature_type, )
+            # print(feature_type)
             non_text_feature = features[feature_type].to(device)
             mode = self.feature_modes.get(feature_type)
 
@@ -108,8 +194,10 @@ class TextFeatureOPTModel(nn.Module):
                 # else:
                 #     feature_input = non_text_feature.unsqueeze(1)
                                 
-                # feature_input = non_text_feature.mean(dim=1)
-                feature_embeddings = embedding_transform(non_text_feature.float())
+                # feature_input = non_text_feature.mean(dim=1).unsqueeze(1)
+                feature_input = non_text_feature
+                # print(feature_input.shape)
+                feature_embeddings = embedding_transform(feature_input.float())
                 feature_inputs.append(feature_embeddings)
 
         # Concatenate feature embeddings with text embeddings
@@ -165,8 +253,13 @@ def evaluate_model(model, test_loader, device):
             predicted = model(features, device, label_ids=None)
 
             # Store predictions and actual labels
-            predictions.extend(predicted.cpu().numpy())
-            actuals.extend(label_ids.cpu().numpy())
+            predictions.extend(predicted)
+            
+            decoded_labels = model.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+
+            actuals.extend(decoded_labels)
+    print(predictions)
+    print(actuals)
 
     # Calculate accuracy
     accuracy = np.mean(np.array(predictions) == np.array(actuals))
@@ -222,98 +315,13 @@ def train_model(model, train_loader, test_loader, optimizer, criterion, device, 
             save_checkpoint(model, optimizer, epoch, checkpoint_filename)
             
         # Evaluate model (ensure evaluate_model is adapted for DataLoader usage)
-        evaluate_model(model,test_loader, device)
+        evaluate_model(model, test_loader, device)
     
 def proprocess_output(train_output, test_output, class_mapping):
     train_output = [class_mapping[i] for i in train_output]
     test_output = [class_mapping[i] for i in test_output]
     return train_output, test_output
 
-
-class MyCustomDataset(Dataset):
-    def __init__(self, data_input, data_output, dataset_name, task_type, tokenizer):
-        self.dataset_name = dataset_name
-        self.task_type = task_type
-        self.data = {'text': [], 'audio': [], 'video': []}
-        self.labels = []
-
-        # Preprocess and tokenize all text data at once
-        prompt_eng_texts = [self._preprocess(item[0], self.dataset_name, self.task_type) for item in data_input]
-        tokenized_texts = tokenizer(prompt_eng_texts, return_tensors="pt", padding=True, truncation=True).input_ids
-
-        # Assuming audio_features and video_features_file are in a format ready to be converted to tensors
-        audio_features = [item[4] for item in data_input]
-        audio_tensor_list = [torch.tensor(features).permute(1, 0) for features in audio_features]
-        video_features_files = [item[5] for item in data_input]
-        video_tensor_list = [torch.tensor(features) for features in video_features_files]
-
-        # Convert lists to tensors
-        self.data = {
-            'text': tokenized_texts, # a 2d tensor
-            # 'audio': pad_sequence(audio_tensor_list, batch_first=True, padding_value=0), # list of 2d tensors
-            'audio': audio_tensor_list,
-            # 'video':  pad_sequence(video_tensor_list, batch_first=True, padding_value=0)# list of 2d tensors
-            'video': video_tensor_list
-        }
-        
-        # Process labels
-        processed_labels = [self._process_output(label, self.dataset_name, self.task_type) for label in data_output]
-        self.labels = tokenizer(processed_labels, return_tensors="pt", padding=True, truncation=True).input_ids
-
-    def _preprocess(self, text, dataset_name, task_type):
-        # Define your preprocessing steps here
-        # For example: concatenate the text with dataset_name and task_type
-        return f"{text} - {dataset_name} - {task_type}"
-    
-    def _process_output(self, label, dataset_name, task_type):
-        
-        sarcasm_mapping = {
-        0: "Non-Sarcastic",
-        1: "Sarcastic"
-        }
-        return sarcasm_mapping[label]
-    
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        label = self.labels[idx]
-
-        feature = {}
-        for mod in self.data.keys():
-            feature[mod] = self.data[mod][idx]
-
-        # return text, feature, label, self.dataset_name, self.task_type
-        return feature, label, self.dataset_name, self.task_type
-
-
-def custom_collate_fn(batch):
-    # Initialize containers for batched data and labels
-    batched_data = {}
-    labels = []
-    dataset_names = []
-    task_types = []
-
-    # Assuming all items in the batch have the same keys
-    modalities = batch[0][0].keys()  # Keys from the first item's data
-
-    for modality in modalities:
-        # Extract features for each modality and pad if necessary
-        features = [item[0][modality] for item in batch]
-
-        if modality in ['audio', 'video']:  # Add other modalities requiring padding here
-            batched_data[modality] = pad_sequence(features, batch_first=True, padding_value=0)
-        else:  # For modalities that don't need padding
-            batched_data[modality] = torch.stack(features, dim=0)
-
-    # Process labels, dataset names, and task types
-    labels = [item[1] for item in batch]
-    dataset_names = [item[2] for item in batch]
-    task_types = [item[3] for item in batch]
-
-    labels_tensor = torch.stack(labels, dim=0)
-
-    return batched_data, labels_tensor, dataset_names, task_types
 
 def train(config, data):
     
@@ -375,7 +383,7 @@ def train(config, data):
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     criterion = nn.CrossEntropyLoss()
     num_epochs = 10
-    
+    # evaluate_model(model, test_loader, device)
 
     # train_model(model, train_features, train_output, test_features, test_output, optimizer, criterion, device, num_epochs, checkpoint_path = 'checkpoints/')
     train_model(model, train_loader, test_loader, optimizer, criterion, device, num_epochs, checkpoint_path = 'checkpoints/')
