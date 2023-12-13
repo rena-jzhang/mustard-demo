@@ -4,26 +4,36 @@ from collections import defaultdict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models import resnet50
 from torch.nn.utils.rnn import pad_sequence
 
-from transformers import T5ForConditionalGeneration, T5Tokenizer
+from transformers import T5ForConditionalGeneration, T5Tokenizer, AutoModelForCausalLM, AutoTokenizer
 from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from tqdm import tqdm
 import numpy as np
+from transformers import LlamaForCausalLM, LlamaTokenizer
 
 from config import CONFIG_BY_KEY
 from data_loader import DataPreper, DataHelper
-from utils import gpu_monitor, save_checkpoint, prompt_eng
+from utils import *
 
+import wandb
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # LM_VERSION = 'google/flan-t5-xxl'
-LM_VERSION = 't5-large'
+LM_VERSION = 't5-small'
+# LM_VERSION = 'meta-llama/Llama-2-7b-hf'
+# LM_VERSION = 'llama/llama-2-7b-hf'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-LR = 1e-3
+LR = 3e-3
+BATCH_SIZE = 16
+TEST_BATCH_SIZE = 64
+num_epochs = 20
+
 seed = 42
 torch.manual_seed(seed)
 
@@ -31,14 +41,14 @@ class MyCustomDataset(Dataset):
     def __init__(self, data_input, data_output, dataset_name, task_type, tokenizer):
         self.dataset_name = dataset_name
         self.task_type = task_type
+        
         self.data = {'text': [], 'audio': [], 'video': []}
-        self.labels = []
 
         # Preprocess and tokenize all text data at once
         prompt_eng_texts = [self._preprocess(item[0], self.dataset_name, self.task_type) for item in data_input]
+        # print("INPUT TEXTS: ", prompt_eng_texts)
         tokenized_texts = tokenizer(prompt_eng_texts, return_tensors="pt", padding=True, truncation=True).input_ids
 
-        # Assuming audio_features and video_features_file are in a format ready to be converted to tensors
         audio_features = [item[4] for item in data_input]
         audio_tensor_list = [torch.tensor(features).permute(1, 0).mean(dim=0).unsqueeze(0) for features in audio_features]
         video_features_files = [item[5] for item in data_input]
@@ -55,11 +65,10 @@ class MyCustomDataset(Dataset):
         
         # Process labels
         processed_labels = [self._process_output(label, self.dataset_name, self.task_type) for label in data_output]
+        # print("OUTPUT TEXTS: ", processed_labels)
         self.labels = tokenizer(processed_labels, return_tensors="pt", padding=True, truncation=True).input_ids
 
-    def _preprocess(self, text, dataset_name, task_type):
-        # Define your preprocessing steps here
-        
+    def _preprocess(self, text, dataset_name, task_type):        
         template = "Examine the input and categorize it as 'Sarcastic' or 'Non-Sarcastic' in the context of binary sarcasm detection: "
         return f"{template} {text}"
         
@@ -110,25 +119,30 @@ def custom_collate_fn(batch):
     task_types = [item[3] for item in batch]
 
     labels_tensor = torch.stack(labels, dim=0)
+    # print(batched_data.items())
+    # print(labels_tensor)
 
     return batched_data, labels_tensor, dataset_names, task_types
 
 class TextFeatureOPTModel(nn.Module):
     def __init__(self, model_name, feature_types, tokenizer, feature_modes):
         super(TextFeatureOPTModel, self).__init__()
-        # self.opt_model = AutoModelForCausalLM.from_pretrained(opt_model_name).to(device)
-        self.model = T5ForConditionalGeneration.from_pretrained(model_name)
-        
+
+        if "t5" in model_name:
+            self.model = T5ForConditionalGeneration.from_pretrained(model_name)
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(model_name)
+
         # Freeze the T5 model parameters
         for param in self.model.parameters():
             param.requires_grad = False
+            
         self.feature_types = feature_types
         self.feature_modes = feature_modes 
         self.tokenizer = tokenizer
 
-        self.modules = defaultdict(nn.ModuleDict)
-
         # Initialize modules for different feature types
+        self.modules = defaultdict(nn.ModuleDict)
         for feature_type in feature_types:
             if feature_type == 'video':
                 if feature_modes.get(feature_type) == 'raw':
@@ -164,7 +178,7 @@ class TextFeatureOPTModel(nn.Module):
         
     def forward(self, features, device, label_ids = None):
         # process text
-        text_input_ids = features['text']
+        text_input_ids = features['text'].to(device)
         input_embeddings = self.model.get_input_embeddings()
         text_embeddings = input_embeddings(text_input_ids)
 
@@ -174,8 +188,6 @@ class TextFeatureOPTModel(nn.Module):
             # print(feature_type)
             non_text_feature = features[feature_type].to(device)
             mode = self.feature_modes.get(feature_type)
-
-            embedding_transform = self.modules[feature_type]['embedding_transform']
             
             if mode == 'raw':
                 encoder = self.modules[feature_type]['encoder']
@@ -184,28 +196,18 @@ class TextFeatureOPTModel(nn.Module):
                     feature_input = encoder(non_text_feature)
                 feature_input = torch.flatten(feature_input, start_dim=1).float()
 
-                feature_embeddings = embedding_transform(feature_input)
+                feature_embeddings = self.modules[feature_type]['embedding_transform'](feature_input)
                 feature_inputs.append(feature_embeddings.unsqueeze(1))
             
             elif mode == 'precomputed':
-                # print('FEATURE DIM: ', non_text_feature.dim())
-                # if non_text_feature.dim() == 1:
-                #     feature_input = non_text_feature.unsqueeze(0).unsqueeze(0)
-                # else:
-                #     feature_input = non_text_feature.unsqueeze(1)
-                                
-                # feature_input = non_text_feature.mean(dim=1).unsqueeze(1)
-                feature_input = non_text_feature
-                # print(feature_input.shape)
-                feature_embeddings = embedding_transform(feature_input.float())
+                              
+                feature_embeddings = self.modules[feature_type]['embedding_transform'](non_text_feature.float())
                 feature_inputs.append(feature_embeddings)
 
-        # Concatenate feature embeddings with text embeddings
+        # process mutlimodal embeddings
         multimodal_embeddings = [text_embeddings] + feature_inputs
-        
         combined_embeddings = self.fusion(multimodal_embeddings)
         
-        # Handling both training and evaluation
         if label_ids is not None:
             loss = self.model(inputs_embeds=combined_embeddings.float(), labels=label_ids, return_dict=True).loss
             return loss
@@ -219,122 +221,41 @@ class TextFeatureOPTModel(nn.Module):
         return torch.cat(multimodal_embeddings, dim=1)
     
     def print_gradients(self):
-        print("Parameters that require gradients:")
+        print("Parameters Gradients:")
+        print('self.modules[audio][embedding_transform].bias.grad: ', self.modules["audio"]["embedding_transform"].bias.grad[:10])
+                    
+    def print_param(self):
+        print("Parameters:")
+        print('self.modules[audio][embedding_transform].bias: ', self.modules["audio"]["embedding_transform"].bias[:10])
 
-        # # Checking for T5 model
-        # for name, param in self.model.named_parameters():
-        #     print(f"self.model.{name}: {param.requires_grad}")
-
-        # Checking for other modules like encoders and embedding_transform
-        for feature_type in self.feature_types:
-            for module_name, module in self.modules[feature_type].items():
-                for name, param in module.named_parameters():
-                    print(f"self.modules[{feature_type}][{module_name}].{name}: {param.requires_grad}")
-
-def evaluate_model(model, test_loader, device):
-    model.eval()  # Set the model to evaluation mode
-    predictions = []
-    actuals = []
-
-    with torch.no_grad():
-        progress_bar = tqdm(test_loader, desc='Evaluating', unit='batch')
-
-        for batch in progress_bar:
-            features, labels, _, _ = batch
-
-            # Assuming 'text' is one of the modalities and labels are already tensorized
-            # text_input_ids = features['text'].to(device)
-            label_ids = labels.to(device)
-
-            # Prepare non-text features
-            # non_text_feature_inputs = dict([features[feature_type].to(device) for feature_type in features if feature_type != 'text']
-
-            # Predict
-            predicted = model(features, device, label_ids=None)
-
-            # Store predictions and actual labels
-            predictions.extend(predicted)
-            
-            decoded_labels = model.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-
-            actuals.extend(decoded_labels)
-    print(predictions)
-    print(actuals)
-
-    # Calculate accuracy
-    accuracy = np.mean(np.array(predictions) == np.array(actuals))
-    print(f'Test Accuracy: {accuracy:.4f}')
-
-    # Save predictions and actuals to a file
-    with open('predictions_actuals.csv', 'w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(['Prediction', 'Actual'])
-        for pred, act in zip(predictions, actuals):
-            writer.writerow([pred, act])
-
-    return accuracy
-
-def train_model(model, train_loader, test_loader, optimizer, criterion, device, num_epochs, checkpoint_path):
-    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-
-    model.train()
-    best_loss = float('inf')
-    
-    for epoch in range(num_epochs):
-        total_loss = 0
-        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}', unit='batch')
-
-        for batch in progress_bar:
-            # Unpack the batch
-            features, labels, dataset_names, task_types = batch
-
-            # Assuming 'text' is one of the modalities and labels are already tokenized
-            # text_input_ids = features['text'].to(device)
-            label_ids = labels.to(device)
-
-            # Prepare non-text features (assuming they are already tensorized and moved to device in collate_fn)
-            # non_text_feature_inputs = [features[feature_type].to(device) for feature_type in features if feature_type != 'text']
-
-            optimizer.zero_grad()
-            loss = model(features, device, label_ids)
-            total_loss += loss.item()
-
-            loss.backward()
-            optimizer.step()
-
-            # Update progress bar
-            progress_bar.set_postfix({'loss': total_loss / len(progress_bar)})
-
-        average_loss = total_loss / len(train_loader)
-        print(f'Epoch [{epoch+1}/{num_epochs}], Training Loss: {average_loss:.4f}')
-
-        # Save checkpoint if it's the best model so far
-        if average_loss < best_loss:
-            best_loss = average_loss
-            checkpoint_filename = os.path.join(checkpoint_path, f'model_checkpoint_epoch_{epoch+1}.pth')
-            save_checkpoint(model, optimizer, epoch, checkpoint_filename)
-            
-        # Evaluate model (ensure evaluate_model is adapted for DataLoader usage)
-        evaluate_model(model, test_loader, device)
-    
-def proprocess_output(train_output, test_output, class_mapping):
-    train_output = [class_mapping[i] for i in train_output]
-    test_output = [class_mapping[i] for i in test_output]
-    return train_output, test_output
 
 
 def train(config, data):
     
     dataset_name, task_type = 'mustard', 'C'
+    
+    # wandb setup
+    project_name = dataset_name
+    run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}'   
+    entity_name = 'rena-jzhang'  
+    wandb.init(project=project_name, entity=entity_name, name = run_name)
+    wandb.config = {
+        "learning_rate": LR,
+        "epochs": num_epochs,
+        "batch_size": BATCH_SIZE
+    }
+    
+    if "t5" in LM_VERSION:
+        tokenizer = T5Tokenizer.from_pretrained(LM_VERSION)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(LM_VERSION)
+        tokenizer.pad_token = tokenizer.eos_token
         
-    tokenizer = T5Tokenizer.from_pretrained(LM_VERSION)
-
+    # Split
     all_indices = data.get_all_indices_shuffled()
-
     split_point = int(len(all_indices) * 0.8)  
     train_index = all_indices[:split_point]
     test_index = all_indices[split_point:]
-    
     
     ''' prev implementation
     # prepare data
@@ -360,10 +281,10 @@ def train(config, data):
     test_input, test_output = data.get_split(test_index)
         
     train_dataset = MyCustomDataset(train_input, train_output, dataset_name, task_type, tokenizer)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, collate_fn = custom_collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, collate_fn = custom_collate_fn)
 
     test_dataset = MyCustomDataset(test_input, test_output, dataset_name, task_type, tokenizer)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=True, num_workers=4, collate_fn = custom_collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, shuffle=False, num_workers=4, collate_fn = custom_collate_fn)
 
     # Example usage of data_loader in a training loop
     for batch in test_loader:
@@ -374,20 +295,15 @@ def train(config, data):
     # prepare model
     model = TextFeatureOPTModel(LM_VERSION, list(non_text_feature_modes.keys()), tokenizer, feature_modes=non_text_feature_modes).to(device)
     model.float() 
-    model.print_gradients()
-
-    # model = torch.nn.DataParallel(model)
 
     print("Prepared model")
     gpu_monitor()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-    criterion = nn.CrossEntropyLoss()
-    num_epochs = 10
-    # evaluate_model(model, test_loader, device)
-
-    # train_model(model, train_features, train_output, test_features, test_output, optimizer, criterion, device, num_epochs, checkpoint_path = 'checkpoints/')
-    train_model(model, train_loader, test_loader, optimizer, criterion, device, num_epochs, checkpoint_path = 'checkpoints/')
-
+        
+    optimizer = prepare_optimizer(model, LR)
+    
+    train_model(model, train_loader, test_loader, optimizer, device, num_epochs, checkpoint_path = 'checkpoints/', run_name = run_name)
+    
+    wandb.finish()
 if __name__ == "__main__":
     
     torch.cuda.empty_cache()
@@ -399,3 +315,4 @@ if __name__ == "__main__":
     
     data = DataPreper(config)
     train(config, data)
+    

@@ -1,6 +1,117 @@
 
 import torch
+from main import TextFeatureOPTModel
+import os
+import csv
+from tqdm import tqdm
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+import wandb
 
+def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
+    model.eval() 
+    predictions = []
+    actuals = []
+
+    with torch.no_grad():
+        progress_bar = tqdm(test_loader, desc='Evaluating', unit='batch')
+
+        for batch in progress_bar:
+            features, labels, _, _ = batch
+            label_ids = labels.to(device)
+
+            predicted = model(features, device, label_ids=None)
+
+            predictions.extend(predicted)            
+            decoded_labels = model.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+
+            actuals.extend(decoded_labels)
+            
+    # Cdalculate accuracy, precision, recall, and F1 score
+    actuals = [item.lower() for item in actuals]
+    predictions = [postpros(res.lower()) for res in predictions]
+    accuracy = accuracy_score(actuals, predictions)
+    precision = precision_score(actuals, predictions, average='macro')
+    recall = recall_score(actuals, predictions, average='macro')
+    f1 = f1_score(actuals, predictions, average='macro')
+    print(f'Test Accuracy: {accuracy:.4f}')
+    print(f'Precision: {precision:.4f}')
+    print(f'Recall: {recall:.4f}')
+    print(f'F1 Score: {f1:.4f}')
+    wandb.log({"eval_accuracy": accuracy, "eval_precision": precision, "eval_recall": recall, "eval_f1": f1})
+    
+    # Save predictions and actuals to a file
+    folder_name = f"results/{run_name}"
+    if not os.path.exists(folder_name):
+        os.makedirs(folder_name)
+    if epoch is not None:
+        file_name = os.path.join(folder_name, f'predictions_actuals_{epoch}.csv')
+    else:
+        file_name = os.path.join(folder_name, 'predictions_actuals.csv')
+        
+    with open(file_name, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Prediction', 'Actual'])
+        for pred, act in zip(predictions, actuals):
+            writer.writerow([pred, act])
+
+def train_model(model, train_loader, test_loader, optimizer, device, num_epochs, checkpoint_path, run_name):
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+
+    model.train()
+    best_loss = float('inf')
+    
+    for epoch in range(num_epochs):
+        total_loss = 0
+        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}', unit='batch')
+
+        for batch in progress_bar:
+            features, labels, dataset_names, task_types = batch
+            label_ids = labels.to(device)
+
+            optimizer.zero_grad()
+            loss = model(features, device, label_ids)
+            total_loss += loss.item()
+
+            loss.backward()
+            optimizer.step()
+            
+            del features, label_ids
+            torch.cuda.empty_cache()
+
+            progress_bar.set_postfix({'loss': total_loss / len(progress_bar)})
+
+        average_loss = total_loss / len(train_loader)
+        print(f'Epoch [{epoch+1}/{num_epochs}], Training Loss: {average_loss:.4f}')
+        wandb.log({"epoch": epoch, "loss": average_loss, "lr": optimizer.param_groups[0]['lr']})
+
+        # if average_loss < best_loss:
+        #     best_loss = average_loss
+        #     checkpoint_filename = os.path.join(checkpoint_path, f'model_checkpoint_epoch_{epoch+1}.pth')
+        #     save_checkpoint(model, optimizer, epoch, checkpoint_filename)
+            
+        evaluate_model(model, test_loader, device, epoch, run_name)
+    
+def proprocess_output(train_output, test_output, class_mapping):
+    train_output = [class_mapping[i] for i in train_output]
+    test_output = [class_mapping[i] for i in test_output]
+    return train_output, test_output
+
+
+def prepare_optimizer(model, lr):
+    trainable_params = []
+    for feature_type in model.feature_types:
+        embedding_transform = model.modules[feature_type]['embedding_transform']
+        if embedding_transform is not None:
+            for param in embedding_transform.parameters():
+                if param.requires_grad:
+                    trainable_params.append(param)
+    optimizer = torch.optim.Adam(trainable_params, lr=lr)
+    return optimizer
+
+def postpros(res):
+    if res in ['sarcasm', 'sarcastic', '(sarcastic)']:
+        return 'sarcastic'
+    return res
 
 def prompt_eng(train_features, test_features, template):
     train_features['text'] = [f"{template} {text}" for text in train_features['text']]
