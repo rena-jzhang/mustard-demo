@@ -38,6 +38,7 @@ class CustomDataset(Dataset):
         audio = self.audio_features[idx]
         label = self.labels[idx]
         return text, video, audio, label
+    
 class DataPreper:
     DATA_PATH = "data/sarcasm_data.json"
     AUDIO_PICKLE = "data/audio_features.p"

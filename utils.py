@@ -1,6 +1,5 @@
 
 import torch
-from main import TextFeatureOPTModel
 import os
 import csv
 from tqdm import tqdm
