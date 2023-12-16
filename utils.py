@@ -6,6 +6,7 @@ from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import wandb
 
+
 def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
     model.eval() 
     predictions = []
@@ -46,8 +47,8 @@ def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
         file_name = os.path.join(folder_name, f'predictions_actuals_{epoch}.csv')
     else:
         file_name = os.path.join(folder_name, 'predictions_actuals.csv')
-        
-    with open(file_name, 'w', newline='') as file:
+
+    with open(file_name, 'w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         writer.writerow(['Prediction', 'Actual'])
         for pred, act in zip(predictions, actuals):

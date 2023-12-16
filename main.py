@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models import resnet50
-from torch.nn.utils.rnn import pad_sequence
 
 from transformers import T5ForConditionalGeneration, T5Tokenizer, AutoModelForCausalLM, AutoTokenizer
 # from transformers import LlamaForCausalLM, LlamaTokenizer
@@ -13,6 +12,7 @@ from transformers import T5ForConditionalGeneration, T5Tokenizer, AutoModelForCa
 from config import CONFIG_BY_KEY
 from data_loader import DataPreper, DataHelper
 from utils import *
+from mmidataset import MMDataset, custom_collate_fn
 
 import wandb
 
@@ -29,107 +29,13 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 LR = 3e-3
 BATCH_SIZE = 16
 TEST_BATCH_SIZE = 64
-num_epochs = 20
-
-# wandb setup
-project_name = dataset_name
-run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}'   
-entity_name = 'rena-jzhang'  
-wandb.init(project=project_name, entity=entity_name, name = run_name)
-wandb.config = {
-    "learning_rate": LR,
-    "epochs": num_epochs,
-    "batch_size": BATCH_SIZE
-}
-
-seed = 42
-torch.manual_seed(seed)
-
-class MMDataset(Dataset):
-    def __init__(self, data_input, data_output, non_text_feature_modes, dataset_name, task_type, tokenizer):
-        self.dataset_name = dataset_name
-        self.task_type = task_type
-        
-        self.data = {}
-
-        # Preprocess and tokenize all text data at once
-        prompt_eng_texts = [self._preprocess(item[0], self.dataset_name, self.task_type) for item in data_input]
-        tokenized_texts = tokenizer(prompt_eng_texts, return_tensors="pt", padding=True, truncation=True).input_ids
-        self.data['text'] = tokenized_texts
-
-        for feature_type, feature_mode in non_text_feature_modes.items():
-            if feature_type == 'video':
-                # TODO 
-                audio_features = [item[4] for item in data_input]
-                
-                # precomputed
-                if feature_mode != 'raw':
-                    audio_tensor_list = [torch.tensor(features).permute(1, 0).mean(dim=0).unsqueeze(0) for features in audio_features]
-                
-                self.data['video'] = audio_tensor_list
-            elif feature_type == 'audio':
-                # TODO
-                video_features_files = [item[5] for item in data_input]
-                                # precomputed
-                if feature_mode != 'raw':
-                    video_tensor_list = [torch.tensor(features).mean(dim=0).unsqueeze(0) for features in video_features_files]
-                
-                self.data['audio'] = video_tensor_list
-                
-        # Process labels
-        processed_labels = [self._process_output(label, self.dataset_name, self.task_type) for label in data_output]
-        # print("OUTPUT TEXTS: ", processed_labels)
-        self.labels = tokenizer(processed_labels, return_tensors="pt", padding=True, truncation=True).input_ids
-
-    def _preprocess(self, text, dataset_name, task_type):        
-        template = "Examine the input and categorize it as 'sarcastic' or 'non-sarcastic' in the context of binary sarcasm detection: "
-        return f"{template} {text}"
-        
-    def _process_output(self, label, dataset_name, task_type):
-        sarcasm_mapping = {
-            # 0: "Non-Sarcastic",
-            # 1: "Sarcastic"
-            0: "non-sarcastic",
-            1: "sarcastic"
-        }
-        return sarcasm_mapping[label]
-    
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        label = self.labels[idx]
-
-        feature = {}
-        for mod in self.data.keys():
-            feature[mod] = self.data[mod][idx]
-
-        return feature, label, self.dataset_name, self.task_type
-
-def custom_collate_fn(batch):
-    batched_data = {}
-    labels = []
-    dataset_names = []
-    task_types = []
-
-    # process features
-    modalities = batch[0][0].keys() 
-    for modality in modalities:
-        
-        features = [item[0][modality] for item in batch]
-        if modality in ['audio', 'video']:  # Add other modalities requiring padding here
-            batched_data[modality] = pad_sequence(features, batch_first=True, padding_value=0)
-        else:  # For modalities that don't need padding
-            batched_data[modality] = torch.stack(features, dim=0)
-
-    # Process labels, dataset names, and task types
-    labels = [item[1] for item in batch]
-    labels_tensor = torch.stack(labels, dim=0)
-
-    dataset_names = [item[2] for item in batch]
-    task_types = [item[3] for item in batch]
-    
-    return batched_data, labels_tensor, dataset_names, task_types
+num_epochs = 50
+seeds = [
+    42, 
+    2023, 
+    2024
+    ]
+num_runs = 1
 
 class TextFeatureOPTModel(nn.Module):
     def __init__(self, model_name, non_text_feature_types, tokenizer, feature_modes):
@@ -236,7 +142,6 @@ class TextFeatureOPTModel(nn.Module):
         print('self.modules[audio][embedding_transform].bias: ', self.modules["audio"]["embedding_transform"].bias[:10])
 
 
-
 def train(data):
     
     
@@ -245,7 +150,7 @@ def train(data):
     else:
         tokenizer = AutoTokenizer.from_pretrained(LM_VERSION)
         tokenizer.pad_token = tokenizer.eos_token
-        
+    
     # Split
     all_indices = data.get_all_indices_shuffled()
     split_point = int(len(all_indices) * 0.8)  
@@ -278,7 +183,6 @@ def train(data):
     optimizer = prepare_optimizer(model, LR)
     train_model(model, train_loader, test_loader, optimizer, device, num_epochs, checkpoint_path = 'checkpoints/', run_name = run_name)
     
-    wandb.finish()
 if __name__ == "__main__":
     
     torch.cuda.empty_cache()
@@ -289,5 +193,22 @@ if __name__ == "__main__":
     gpu_monitor()
     
     data = DataPreper(config)
-    train(data)
+    for seed in seeds:
+        torch.manual_seed(seed)
+        for i in range(num_runs):
+        
+            # wandb setup
+            project_name = dataset_name
+            run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}_{seed}_{i}_50ep'   
+            entity_name = 'rena-jzhang'  
+            wandb.init(project=project_name, entity=entity_name, name = run_name)
+            wandb.config = {
+                "learning_rate": LR,
+                "epochs": num_epochs,
+                "batch_size": BATCH_SIZE
+            }
+
+            train(data)
+        
+            wandb.finish()
     
