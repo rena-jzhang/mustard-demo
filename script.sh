@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --time=72:00:00
 #SBATCH --gres=gpu:1                # Request 1 GPU, modify if more GPUs are needed
-#SBATCH -p highrem
+#SBATCH -p highmem
 #SBATCH -c 4 
 #SBATCH --mem=80g 
 #SBATCH -w atlas-2-13 

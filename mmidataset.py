@@ -6,8 +6,73 @@ from torch.utils.data import Dataset
 import pandas as pd
 from torch.nn.utils.rnn import pad_sequence
 
+import os
+import numpy as np
+from sklearn.model_selection import train_test_split
 
-# from train.info import *
+import cv2
+import torch
+import torchvision.transforms as transforms
+import torchvision.models as models
+
+
+def audio_file_processor(audio_folder):
+    # Add your audio processing logic here
+    return []
+
+def text_file_processor(text_folder):
+    # Add your text processing logic here
+    return []
+
+def label_file_processor(label_folder):
+    # Add your label processing logic here
+    return []
+
+# lists of features
+def process_dataset(dataset_folders):
+    data = {'video': [], 'audio': [], 'text': [], 'label': []}
+    for modality, folder in dataset_folders.items():
+        if modality == 'video':
+            data['video'].extend(video_processor(folder))
+        elif modality == 'audio':
+            data['audio'].extend(audio_file_processor(folder))
+        elif modality == 'text':
+            data['text'].extend(text_file_processor(folder))
+        elif modality == 'label':
+            data['label'].extend(label_file_processor(folder))
+    return data
+
+# Split indices for a dataset
+def indice_split(data, test_ratio=0.2):
+    indices = np.arange(len(data))
+    np.random.shuffle(indices)
+    test_size = int(len(indices) * test_ratio)
+    train_indices = indices[test_size:]
+    test_indices = indices[:test_size]
+    return train_indices, test_indices
+
+# List of datasets, each represented by a dictionary
+datasets = {
+    'task1': {'video': 'path/to/video_folder1', 'audio': 'path/to/audio_folder1', 'text': 'path/to/text_folder1', 'label': 'path/to/label_folder1'},
+    'task2': {'video': 'path/to/video_folder2', 'audio': 'path/to/audio_folder2', 'label': 'path/to/label_folder2'}
+    # Add more datasets if necessary
+}
+
+# # Process each dataset and create train/test data
+# for dataset in datasets:
+#     processed_data = process_dataset(dataset)
+    
+#     train_indices, test_indices = indice_split(processed_data['label'])
+
+#     # Create data for each set of indices
+#     def create_data(indices):
+#         data_input = {modality: [processed_data[modality][i] for i in indices] for modality in processed_data if modality != 'label'}
+#         data_output = [processed_data['label'][i] for i in indices]
+#         return data_input, data_output
+
+#     train_input, train_output = create_data(train_indices)
+#     test_input, test_output = create_data(test_indices)
+
 class MMDataset(Dataset):
     def __init__(self, data_input, data_output, non_text_feature_modes, dataset_name, task_type, tokenizer):
         self.dataset_name = dataset_name

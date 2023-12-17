@@ -21,9 +21,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 dataset_name, task_type = 'mustard', 'C'
 
 # LM_VERSION = 'google/flan-t5-xxl'
-LM_VERSION = 't5-small'
+# LM_VERSION = 't5-small'
 # LM_VERSION = 'meta-llama/Llama-2-7b-hf'
-# LM_VERSION = 'llama/llama-2-7b-hf'
+LM_VERSION = 'llama/llama-2-7b-hf'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 LR = 3e-3
@@ -122,6 +122,8 @@ class TextFeatureOPTModel(nn.Module):
         combined_embeddings = self.fusion(multimodal_embeddings)
         
         if label_ids is not None:
+            print(f"INPUT SHAPE {combined_embeddings.shape}")
+            print(f"OUTPUT SHAPE {label_ids.shape}")
             loss = self.model(inputs_embeds=combined_embeddings.float(), labels=label_ids, return_dict=True).loss
             return loss
         else:
