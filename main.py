@@ -29,7 +29,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 LR = 3e-3
 BATCH_SIZE = 16
 TEST_BATCH_SIZE = 64
-num_epochs = 50
+num_epochs = 20
 seeds = [
     42, 
     2023, 
@@ -41,10 +41,10 @@ class TextFeatureOPTModel(nn.Module):
     def __init__(self, model_name, non_text_feature_types, tokenizer, feature_modes):
         super(TextFeatureOPTModel, self).__init__()
 
-        if "t5" in model_name:
-            self.model = T5ForConditionalGeneration.from_pretrained(model_name)
-        else:
-            self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        # if "t5" in model_name:
+        #     self.model = T5ForConditionalGeneration.from_pretrained(model_name)
+        # else:
+        self.model = AutoModelForCausalLM.from_pretrained(model_name)
 
         # Freeze the T5 model parameters
         for param in self.model.parameters():
@@ -95,6 +95,8 @@ class TextFeatureOPTModel(nn.Module):
         input_embeddings = self.model.get_input_embeddings()
         text_embeddings = input_embeddings(text_input_ids)
 
+        label_embeddings = input_embeddings(label_ids.to(device))
+        
         # Process non-text features
         feature_inputs = []
         for i, feature_type in enumerate(self.feature_types):
@@ -118,13 +120,18 @@ class TextFeatureOPTModel(nn.Module):
                 feature_inputs.append(feature_embeddings)
 
         # process mutlimodal embeddings
-        multimodal_embeddings = [text_embeddings] + feature_inputs
+        multimodal_embeddings = [text_embeddings] + feature_inputs + [label_embeddings]
         combined_embeddings = self.fusion(multimodal_embeddings)
         
         if label_ids is not None:
             print(f"INPUT SHAPE {combined_embeddings.shape}")
             print(f"OUTPUT SHAPE {label_ids.shape}")
-            loss = self.model(inputs_embeds=combined_embeddings.float(), labels=label_ids, return_dict=True).loss
+            
+            #TODO
+            loss = self.model(inputs_embeds=combined_embeddings.float(), return_dict=True).loss
+
+            # loss = self.model(inputs_embeds=combined_embeddings.float(), labels=label_ids, return_dict=True).loss
+            
             return loss
         else:
             with torch.no_grad():
@@ -146,12 +153,11 @@ class TextFeatureOPTModel(nn.Module):
 
 def train(data):
     
-    
-    if "t5" in LM_VERSION:
-        tokenizer = T5Tokenizer.from_pretrained(LM_VERSION)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(LM_VERSION)
-        tokenizer.pad_token = tokenizer.eos_token
+    # if "t5" in LM_VERSION:
+    #     tokenizer = T5Tokenizer.from_pretrained(LM_VERSION)
+    # else:
+    tokenizer = AutoTokenizer.from_pretrained(LM_VERSION)
+    tokenizer.pad_token = tokenizer.eos_token
     
     # Split
     all_indices = data.get_all_indices_shuffled()
@@ -201,7 +207,7 @@ if __name__ == "__main__":
         
             # wandb setup
             project_name = dataset_name
-            run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}_{seed}_{i}_50ep'   
+            run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}_{seed}_{i}'   
             entity_name = 'rena-jzhang'  
             wandb.init(project=project_name, entity=entity_name, name = run_name)
             wandb.config = {
