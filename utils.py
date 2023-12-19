@@ -93,7 +93,6 @@ def proprocess_output(train_output, test_output, class_mapping):
     test_output = [class_mapping[i] for i in test_output]
     return train_output, test_output
 
-
 def prepare_optimizer(model, lr):
     trainable_params = []
     for feature_type in model.feature_types:

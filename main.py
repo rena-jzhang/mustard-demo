@@ -24,20 +24,21 @@ dataset_name, task_type = 'mustard', 'C'
 
 # LM_VERSION = 'google/flan-t5-xxl'
 # LM_VERSION = 't5-small'
-# LM_VERSION = 'gpt2'
-LM_VERSION = '../llama/llama-2-7b-hf'
+LM_VERSION = 'gpt2'
+# LM_VERSION = '../llama/llama-2-7b-hf'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 LR = 3e-3
 BATCH_SIZE = 16
 TEST_BATCH_SIZE = 64
-num_epochs = 50
+num_epochs = 20
 seeds = [
     42, 
     2023, 
     2024
     ]
 num_runs = 1
+OVERFIT = True
 
 class TextFeatureOPTModel(nn.Module):
     def __init__(self, model_name, non_text_feature_types, tokenizer, feature_modes):
@@ -45,11 +46,13 @@ class TextFeatureOPTModel(nn.Module):
 
         # if "t5" in model_name:
         #     self.model = T5ForConditionalGeneration.from_pretrained(model_name)
-        # else:
-        # self.model = AutoModelForCausalLM.from_pretrained(model_name)
-        self.model = LlamaForCausalLM.from_pretrained(model_name)
 
-        # Freeze the T5 model parameters
+        if "llama" in model_name:
+            self.model = LlamaForCausalLM.from_pretrained(model_name)
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(model_name)
+            
+        # Freeze llm
         for param in self.model.parameters():
             param.requires_grad = False
             
@@ -161,6 +164,8 @@ class TextFeatureOPTModel(nn.Module):
             combined_embeddings = self.fusion([non_text_embeddings, text_embeddings]).to(device)
             label_ids = pad_sequence(label_ids, batch_first=True).to(device)
             attention_masks = pad_sequence(attention_masks, batch_first=True).to(device)
+            print(label_ids.shape, attention_masks.shape)
+            print(label_ids[0], attention_masks[0])
             
             # # label_embeddings = self.model.get_input_embeddings()(label_ids.to(device))
             # # multimodal_embeddings += [label_embeddings]
@@ -230,9 +235,12 @@ def train(data, run_name):
     
     # if "t5" in LM_VERSION:
     #     tokenizer = T5Tokenizer.from_pretrained(LM_VERSION)
-    # else:
-    tokenizer = LlamaTokenizer.from_pretrained(LM_VERSION)
- 
+    
+    if "llama" in LM_VERSION:
+        tokenizer = LlamaTokenizer.from_pretrained(LM_VERSION)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(LM_VERSION)
+
     tokenizer.pad_token = tokenizer.eos_token
     
     # Split
@@ -247,8 +255,12 @@ def train(data, run_name):
             
     train_dataset = MMDataset(train_input, train_output, non_text_feature_modes, dataset_name, task_type, tokenizer)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, collate_fn = custom_collate_fn)
-
-    test_dataset = MMDataset(test_input, test_output, non_text_feature_modes, dataset_name, task_type, tokenizer)
+    
+    if OVERFIT:
+        test_dataset = MMDataset(train_input[:100], train_output[:100], non_text_feature_modes, dataset_name, task_type, tokenizer)
+    else:
+        test_dataset = MMDataset(test_input, test_output, non_text_feature_modes, dataset_name, task_type, tokenizer)
+        
     test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, shuffle=False, num_workers=4, collate_fn = custom_collate_fn)
 
     # Example usage of data_loader in a training loop
@@ -284,7 +296,9 @@ if __name__ == "__main__":
             # wandb setup
             project_name = dataset_name
             run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}_{seed}_{i}'   
-
+            if OVERFIT:
+                run_name += '_overfit'
+                
             entity_name = 'rena-jzhang'  
             wandb.init(project=project_name, entity=entity_name, name = run_name)
             wandb.config = {
