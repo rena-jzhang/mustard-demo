@@ -7,12 +7,14 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.models import resnet50
 
 from transformers import T5ForConditionalGeneration, T5Tokenizer, AutoModelForCausalLM, AutoTokenizer
-# from transformers import LlamaForCausalLM, LlamaTokenizer
+from transformers import LlamaForCausalLM, LlamaTokenizer
 
 from config import CONFIG_BY_KEY
 from data_loader import DataPreper, DataHelper
 from utils import *
 from mmidataset import MMDataset, custom_collate_fn
+from torch.nn.utils.rnn import pad_sequence
+
 
 import wandb
 
@@ -22,14 +24,14 @@ dataset_name, task_type = 'mustard', 'C'
 
 # LM_VERSION = 'google/flan-t5-xxl'
 # LM_VERSION = 't5-small'
-# LM_VERSION = 'meta-llama/Llama-2-7b-hf'
-LM_VERSION = 'llama/llama-2-7b-hf'
+# LM_VERSION = 'gpt2'
+LM_VERSION = '../llama/llama-2-7b-hf'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 LR = 3e-3
 BATCH_SIZE = 16
 TEST_BATCH_SIZE = 64
-num_epochs = 20
+num_epochs = 50
 seeds = [
     42, 
     2023, 
@@ -44,7 +46,8 @@ class TextFeatureOPTModel(nn.Module):
         # if "t5" in model_name:
         #     self.model = T5ForConditionalGeneration.from_pretrained(model_name)
         # else:
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        # self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        self.model = LlamaForCausalLM.from_pretrained(model_name)
 
         # Freeze the T5 model parameters
         for param in self.model.parameters():
@@ -89,21 +92,20 @@ class TextFeatureOPTModel(nn.Module):
     def tokenize(self, text_input):
         return self.tokenizer(text_input, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
         
-    def forward(self, features, device, label_ids = None):
-        # process text
-        text_input_ids = features['text'].to(device)
-        input_embeddings = self.model.get_input_embeddings()
-        text_embeddings = input_embeddings(text_input_ids)
+    def forward(self, features, device, labels=None):
+        # Set pad_token_id if it's not already set
+        if self.model.config.pad_token_id is None and hasattr(self.model.config, 'eos_token_id'):
+            self.model.config.pad_token_id = self.model.config.eos_token_id
 
-        label_embeddings = input_embeddings(label_ids.to(device))
+        # text_input_ids = features['text'].to(device)
+        # text_embeddings = self.model.get_input_embeddings()(text_input_ids)
         
         # Process non-text features
         feature_inputs = []
         for i, feature_type in enumerate(self.feature_types):
-            # print(feature_type)
             non_text_feature = features[feature_type].to(device)
             mode = self.feature_modes.get(feature_type)
-            
+
             if mode == 'raw':
                 encoder = self.modules[feature_type]['encoder']
 
@@ -112,33 +114,106 @@ class TextFeatureOPTModel(nn.Module):
                 feature_input = torch.flatten(feature_input, start_dim=1).float()
 
                 feature_embeddings = self.modules[feature_type]['embedding_transform'](feature_input)
-                feature_inputs.append(feature_embeddings.unsqueeze(1))
-            
+                feature_inputs.append(feature_embeddings.unsqueeze(1).to(device))
+
             elif mode == 'precomputed':
-                              
                 feature_embeddings = self.modules[feature_type]['embedding_transform'](non_text_feature.float())
-                feature_inputs.append(feature_embeddings)
+                feature_inputs.append(feature_embeddings.to(device))
 
-        # process mutlimodal embeddings
-        multimodal_embeddings = [text_embeddings] + feature_inputs + [label_embeddings]
-        combined_embeddings = self.fusion(multimodal_embeddings)
-        
-        if label_ids is not None:
-            print(f"INPUT SHAPE {combined_embeddings.shape}")
-            print(f"OUTPUT SHAPE {label_ids.shape}")
+        text_input = features['text']
+
+        # Process multimodal embeddings
+        non_text_embeddings = self.fusion(feature_inputs)
+        non_text_len = non_text_embeddings.shape[1]
+
+        if labels is not None:
             
-            #TODO
-            loss = self.model(inputs_embeds=combined_embeddings.float(), return_dict=True).loss
+            # concate quesiton and answer to form the final input
+            
+            bos_token_id = self.tokenizer.bos_token_id  # Get the BOS token ID
+            eos_token = self.tokenizer.eos_token
+            input_ids = []
+            label_ids = []
+            attention_masks = []
 
-            # loss = self.model(inputs_embeds=combined_embeddings.float(), labels=label_ids, return_dict=True).loss
+            for question, answer in zip(text_input, labels):
+                
+                # Tokenize and concatenate question and answer and add some multimodal features in the begininig
+                question_tokens = self.tokenizer.encode(question, add_special_tokens=True)
+                answer_tokens = self.tokenizer.encode(answer + eos_token, add_special_tokens=True)
+                concatenated_tokens = question_tokens + answer_tokens
+
+                # Create labels for training (shift right and use -100 for question part)
+                # label = [-100] * (non_text_len + len(question_tokens)) + answer_tokens[:-1] + [-100]
+                label = [-100] * (non_text_len + len(question_tokens)) + answer_tokens
+
+                # Create attention mask
+                attention_mask = [1] * (len(concatenated_tokens) + non_text_len)
+
+                # Append to lists
+                input_ids.append(torch.tensor(concatenated_tokens))
+                label_ids.append(torch.tensor(label))
+                attention_masks.append(torch.tensor(attention_mask))
+
+            # Convert lists to tensors and pad if necessary
+            input_ids = pad_sequence(input_ids, batch_first=True).to(device)
+            text_embeddings = self.model.get_input_embeddings()(input_ids)
+            combined_embeddings = self.fusion([non_text_embeddings, text_embeddings]).to(device)
+            label_ids = pad_sequence(label_ids, batch_first=True).to(device)
+            attention_masks = pad_sequence(attention_masks, batch_first=True).to(device)
+            
+            # # label_embeddings = self.model.get_input_embeddings()(label_ids.to(device))
+            # # multimodal_embeddings += [label_embeddings]
+            # label_length = label_embeddings.shape[1]
+
+            # # Create attention mask
+            # combined_embeddings = self.fusion(multimodal_embeddings).to(device)
+
+            # attention_masks = torch.ones(combined_embeddings.size()[:-1], device=device)
+
+            # # Prepare labels (shifted answer tokens, -100 for question part)
+            # labels = torch.cat([torch.full((label_ids.size(0), combined_embeddings[:, :-label_length].size(1)), -100, device=device), label_ids], dim=1)
+            # labels = torch.roll(labels, shifts=-1, dims=1)
+            # labels[:, -1] = -100
+            # print(labels[0])
+            # exit()
+
+            loss = self.model(inputs_embeds=combined_embeddings, labels=label_ids, attention_mask=attention_masks, return_dict=True).loss
             
             return loss
+        
         else:
+ 
+            # Prepare input for inference
+            bos_token_id = self.tokenizer.bos_token_id  # Get the BOS token ID
+            input_ids = []
+            attention_masks = []
+
+            for question in text_input:
+                # Tokenize and concatenate question and add BOS token
+                question_tokens = self.tokenizer.encode(question, add_special_tokens=True)
+                concatenated_tokens = question_tokens
+
+                # Create attention mask
+                attention_mask = [1] * (len(concatenated_tokens) + non_text_len)
+
+                # Append to lists
+                input_ids.append(torch.tensor(concatenated_tokens))
+                attention_masks.append(torch.tensor(attention_mask))
+
+            # Convert lists to tensors and pad if necessary
+            input_ids = pad_sequence(input_ids, batch_first=True).to(device)
+            text_embeddings = self.model.get_input_embeddings()(input_ids)
+            combined_embeddings = self.fusion([non_text_embeddings, text_embeddings])
+            attention_masks = pad_sequence(attention_masks, batch_first=True).to(device)
+
             with torch.no_grad():
-                outputs = self.model.generate(inputs_embeds=combined_embeddings.float(), max_length=50)
+                # Create attention mask for combined embeddings
+                outputs = self.model.generate(inputs_embeds=combined_embeddings.to(device), max_length=15, attention_mask=attention_masks)
             decoded_texts = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
             return decoded_texts
-        
+
+            
     def fusion(self, multimodal_embeddings):
         return torch.cat(multimodal_embeddings, dim=1)
     
@@ -151,12 +226,13 @@ class TextFeatureOPTModel(nn.Module):
         print('self.modules[audio][embedding_transform].bias: ', self.modules["audio"]["embedding_transform"].bias[:10])
 
 
-def train(data):
+def train(data, run_name):
     
     # if "t5" in LM_VERSION:
     #     tokenizer = T5Tokenizer.from_pretrained(LM_VERSION)
     # else:
-    tokenizer = AutoTokenizer.from_pretrained(LM_VERSION)
+    tokenizer = LlamaTokenizer.from_pretrained(LM_VERSION)
+ 
     tokenizer.pad_token = tokenizer.eos_token
     
     # Split
@@ -176,9 +252,9 @@ def train(data):
     test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, shuffle=False, num_workers=4, collate_fn = custom_collate_fn)
 
     # Example usage of data_loader in a training loop
-    for batch in test_loader:
+    for batch in train_loader:
         features, labels, dataset_names, task_types = batch
-        print(features['text'].shape, features['video'].shape, features['audio'].shape, labels.shape)
+        print(len(features['text'][0]), features['video'].shape, features['audio'].shape, len(labels[0]))
         break
     
     # prepare model
@@ -204,10 +280,11 @@ if __name__ == "__main__":
     for seed in seeds:
         torch.manual_seed(seed)
         for i in range(num_runs):
-        
+
             # wandb setup
             project_name = dataset_name
             run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}_{seed}_{i}'   
+
             entity_name = 'rena-jzhang'  
             wandb.init(project=project_name, entity=entity_name, name = run_name)
             wandb.config = {
@@ -216,7 +293,7 @@ if __name__ == "__main__":
                 "batch_size": BATCH_SIZE
             }
 
-            train(data)
+            train(data, run_name)
         
             wandb.finish()
     

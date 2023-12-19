@@ -17,15 +17,14 @@ def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
 
         for batch in progress_bar:
             features, labels, _, _ = batch
-            label_ids = labels.to(device)
+            # label_ids = labels.to(device)
 
-            predicted = model(features, device, label_ids=None)
+            predicted = model(features, device)
 
             predictions.extend(predicted)            
-            decoded_labels = model.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-
-            actuals.extend(decoded_labels)
-            
+            # decoded_labels = model.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+            # actuals.extend(decoded_labels)
+            actuals.extend(labels)
     # Cdalculate accuracy, precision, recall, and F1 score
     actuals = [item.lower() for item in actuals]
     predictions = [postpros(res.lower()) for res in predictions]
@@ -66,16 +65,14 @@ def train_model(model, train_loader, test_loader, optimizer, device, num_epochs,
 
         for batch in progress_bar:
             features, labels, dataset_names, task_types = batch
-            label_ids = labels.to(device)
-
             optimizer.zero_grad()
-            loss = model(features, device, label_ids)
+            loss = model(features, device, labels)
             total_loss += loss.item()
 
             loss.backward()
             optimizer.step()
             
-            del features, label_ids
+            del features, labels
             torch.cuda.empty_cache()
 
             progress_bar.set_postfix({'loss': total_loss / len(progress_bar)})
