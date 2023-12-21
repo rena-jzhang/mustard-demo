@@ -240,10 +240,10 @@ class MultiSenseModel(nn.Module):
             ]).to(device)
             #fused_embeddings = text_embeddings.to(device)
             
-            print(self.tokenizer.decode(
-                input_ids[0], 
-                skip_special_tokens=False
-            ))
+            #print(self.tokenizer.decode(
+            #    input_ids[0], 
+            #    skip_special_tokens=False
+            #))
             loss = self.model(
                 inputs_embeds=fused_embeddings, 
                 labels=label_ids, 
@@ -272,14 +272,14 @@ class MultiSenseModel(nn.Module):
             ]).to(device)
             #fused_embeddings = text_embeddings.to(device)
 
-            print(self.tokenizer.decode(
-                input_ids[0], 
-                skip_special_tokens=False
-            ))
-            print(self.tokenizer.decode(
-                input_ids[-1], 
-                skip_special_tokens=False
-            ))
+            #print(self.tokenizer.decode(
+            #    input_ids[0], 
+            #    skip_special_tokens=False
+            #))
+            #print(self.tokenizer.decode(
+            #    input_ids[-1], 
+            #    skip_special_tokens=False
+            #))
             with torch.no_grad():
                 outputs = self.model.generate(
                     inputs_embeds=fused_embeddings, 
@@ -290,7 +290,7 @@ class MultiSenseModel(nn.Module):
                     outputs, 
                     skip_special_tokens=True
                 )
-            print(decoded_texts)
+            #print(decoded_texts)
             return decoded_texts
 
             
