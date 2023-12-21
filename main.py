@@ -114,12 +114,7 @@ class MultiSenseModel(nn.Module):
         return self.tokenizer(text_input, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
 
 
-    def patch_data(self, text_input, non_text_embeddings=None, labels=None):
-        if non_text_embeddings is not None:
-            non_text_len = non_text_embeddings.shape[1]
-        else:
-            non_text_len = 0
-
+    def patch_data(self, text_input, labels=None):
         input_ids = []
         label_ids = []
         attention_masks = []
@@ -145,10 +140,10 @@ class MultiSenseModel(nn.Module):
             concatenated_tokens = question_tokens + answer_tokens
 
             # Create labels for training (shift right and use -100 for question part)
-            label = [-100] * (non_text_len + len(question_tokens)) + answer_tokens
+            label = [-100] * len(question_tokens) + answer_tokens
 
             # Create attention mask
-            attention_mask = [1] * (len(concatenated_tokens) + non_text_len)
+            attention_mask = [1] * (len(concatenated_tokens))
 
             # Append to lists
             input_ids.append(torch.tensor(concatenated_tokens))
@@ -222,7 +217,6 @@ class MultiSenseModel(nn.Module):
         if labels is not None:
             input_ids, label_ids, attention_masks = self.patch_data(
                 text_input=text_input, 
-                non_text_embeddings=non_text_embeddings, 
                 labels=labels
             )
             input_ids, label_ids, attention_masks = self.padding(
@@ -234,10 +228,14 @@ class MultiSenseModel(nn.Module):
             # Convert lists to tensors and pad if necessary
             text_embeddings = self.model.get_input_embeddings()(input_ids)
             fused_embeddings = self.fusion([
-                text_embeddings[:, :-1, :],
                 non_text_embeddings, 
-                text_embeddings[:, -1:, :]
+                text_embeddings
             ]).to(device)
+            non_text_len = non_text_embeddings.shape[1]
+            constant_label_ids = torch.full((label_ids.shape[0], non_text_len), -100).to(device)
+            constant_attention_masks = torch.full((attention_masks.shape[0], non_text_len), 1).to(device)
+            label_ids = torch.cat([constant_label_ids, label_ids], dim=1)
+            attention_masks = torch.cat([constant_attention_masks, attention_masks], dim=1)
             #fused_embeddings = text_embeddings.to(device)
             
             #print(self.tokenizer.decode(
@@ -256,7 +254,6 @@ class MultiSenseModel(nn.Module):
             # Prepare input for inference
             input_ids, attention_masks = self.patch_data(
                 text_input=text_input, 
-                non_text_embeddings=non_text_embeddings, 
                 labels=labels
             )
             input_ids, _, attention_masks = self.padding(
@@ -266,10 +263,12 @@ class MultiSenseModel(nn.Module):
 
             text_embeddings = self.model.get_input_embeddings()(input_ids)
             fused_embeddings = self.fusion([
-                text_embeddings[:, :-1, :],
                 non_text_embeddings, 
-                text_embeddings[:, -1:, :]
+                text_embeddings
             ]).to(device)
+            non_text_len = non_text_embeddings.shape[1]
+            constant_attention_masks = torch.full((attention_masks.shape[0], non_text_len), 1).to(device)
+            attention_masks = torch.cat([constant_attention_masks, attention_masks], dim=1)
             #fused_embeddings = text_embeddings.to(device)
 
             #print(self.tokenizer.decode(
