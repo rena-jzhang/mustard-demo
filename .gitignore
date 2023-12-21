@@ -1,1 +1,5 @@
 /output
+/results/
+/__pycache__/
+/wandb/
+*.zip

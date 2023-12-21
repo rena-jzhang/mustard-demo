@@ -11,3 +11,4 @@ wandb
 pandas
 opencv-python-headless
 tqdm
+gpustat

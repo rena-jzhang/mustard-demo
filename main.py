@@ -24,13 +24,13 @@ dataset_name, task_type = 'mustard', 'C'
 
 # LM_VERSION = 'google/flan-t5-xxl'
 # LM_VERSION = 't5-small'
-LM_VERSION = 'gpt2'
-# LM_VERSION = '../llama/llama-2-7b-hf'
+# LM_VERSION = 'gpt2'
+LM_VERSION = '../web-act/llm_ft/Mistral-7B-Instruct-v0.1'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-LR = 3e-3
-BATCH_SIZE = 16
-TEST_BATCH_SIZE = 64
+LR = 3e-2
+BATCH_SIZE = 2
+TEST_BATCH_SIZE = 1
 num_epochs = 20
 seeds = [
     42, 
@@ -38,19 +38,13 @@ seeds = [
     2024
     ]
 num_runs = 1
-OVERFIT = True
+OVERFIT = False
 
 class TextFeatureOPTModel(nn.Module):
     def __init__(self, model_name, non_text_feature_types, tokenizer, feature_modes):
         super(TextFeatureOPTModel, self).__init__()
 
-        # if "t5" in model_name:
-        #     self.model = T5ForConditionalGeneration.from_pretrained(model_name)
-
-        if "llama" in model_name:
-            self.model = LlamaForCausalLM.from_pretrained(model_name)
-        else:
-            self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name)
             
         # Freeze llm
         for param in self.model.parameters():
@@ -100,15 +94,11 @@ class TextFeatureOPTModel(nn.Module):
         if self.model.config.pad_token_id is None and hasattr(self.model.config, 'eos_token_id'):
             self.model.config.pad_token_id = self.model.config.eos_token_id
 
-        # text_input_ids = features['text'].to(device)
-        # text_embeddings = self.model.get_input_embeddings()(text_input_ids)
-        
         # Process non-text features
         feature_inputs = []
         for i, feature_type in enumerate(self.feature_types):
             non_text_feature = features[feature_type].to(device)
             mode = self.feature_modes.get(feature_type)
-
             if mode == 'raw':
                 encoder = self.modules[feature_type]['encoder']
 
@@ -129,12 +119,11 @@ class TextFeatureOPTModel(nn.Module):
         non_text_embeddings = self.fusion(feature_inputs)
         non_text_len = non_text_embeddings.shape[1]
 
+        eos_token = self.tokenizer.eos_token
+        bos_token = self.tokenizer.bos_token
         if labels is not None:
-            
-            # concate quesiton and answer to form the final input
-            
             bos_token_id = self.tokenizer.bos_token_id  # Get the BOS token ID
-            eos_token = self.tokenizer.eos_token
+
             input_ids = []
             label_ids = []
             attention_masks = []
@@ -142,12 +131,11 @@ class TextFeatureOPTModel(nn.Module):
             for question, answer in zip(text_input, labels):
                 
                 # Tokenize and concatenate question and answer and add some multimodal features in the begininig
-                question_tokens = self.tokenizer.encode(question, add_special_tokens=True)
+                question_tokens = self.tokenizer.encode(question + eos_token, add_special_tokens=True)
                 answer_tokens = self.tokenizer.encode(answer + eos_token, add_special_tokens=True)
                 concatenated_tokens = question_tokens + answer_tokens
 
                 # Create labels for training (shift right and use -100 for question part)
-                # label = [-100] * (non_text_len + len(question_tokens)) + answer_tokens[:-1] + [-100]
                 label = [-100] * (non_text_len + len(question_tokens)) + answer_tokens
 
                 # Create attention mask
@@ -161,34 +149,24 @@ class TextFeatureOPTModel(nn.Module):
             # Convert lists to tensors and pad if necessary
             input_ids = pad_sequence(input_ids, batch_first=True).to(device)
             text_embeddings = self.model.get_input_embeddings()(input_ids)
-            combined_embeddings = self.fusion([non_text_embeddings, text_embeddings]).to(device)
-            label_ids = pad_sequence(label_ids, batch_first=True).to(device)
-            attention_masks = pad_sequence(attention_masks, batch_first=True).to(device)
-            print(label_ids.shape, attention_masks.shape)
-            print(label_ids[0], attention_masks[0])
+            combined_embeddings = self.fusion([text_embeddings[:, :1, :], non_text_embeddings, text_embeddings[:, 1:, :]]).to(device)
+
+            label_ids = pad_sequence(label_ids, batch_first=True, padding_value=-100).to(device)
+            attention_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0).to(device)
+            #print(label_ids.shape, attention_masks.shape)
+            #print(label_ids[0], attention_masks[0])
             
-            # # label_embeddings = self.model.get_input_embeddings()(label_ids.to(device))
-            # # multimodal_embeddings += [label_embeddings]
-            # label_length = label_embeddings.shape[1]
-
-            # # Create attention mask
-            # combined_embeddings = self.fusion(multimodal_embeddings).to(device)
-
-            # attention_masks = torch.ones(combined_embeddings.size()[:-1], device=device)
-
-            # # Prepare labels (shifted answer tokens, -100 for question part)
-            # labels = torch.cat([torch.full((label_ids.size(0), combined_embeddings[:, :-label_length].size(1)), -100, device=device), label_ids], dim=1)
-            # labels = torch.roll(labels, shifts=-1, dims=1)
-            # labels[:, -1] = -100
-            # print(labels[0])
-            # exit()
-
-            loss = self.model(inputs_embeds=combined_embeddings, labels=label_ids, attention_mask=attention_masks, return_dict=True).loss
-            
+            print(self.tokenizer.decode(input_ids[0], skip_special_tokens=False))
+            loss = self.model(
+                inputs_embeds=combined_embeddings, 
+                labels=label_ids, 
+                attention_mask=attention_masks, 
+                return_dict=True
+            ).loss
+            print(loss)
             return loss
         
         else:
- 
             # Prepare input for inference
             bos_token_id = self.tokenizer.bos_token_id  # Get the BOS token ID
             input_ids = []
@@ -196,26 +174,27 @@ class TextFeatureOPTModel(nn.Module):
 
             for question in text_input:
                 # Tokenize and concatenate question and add BOS token
-                question_tokens = self.tokenizer.encode(question, add_special_tokens=True)
-                concatenated_tokens = question_tokens
+                context_tokens = self.tokenizer.encode(question + eos_token + bos_token, add_special_tokens=True)
 
                 # Create attention mask
-                attention_mask = [1] * (len(concatenated_tokens) + non_text_len)
+                attention_mask = [1] * (len(context_tokens) + non_text_len)
 
                 # Append to lists
-                input_ids.append(torch.tensor(concatenated_tokens))
+                input_ids.append(torch.tensor(context_tokens))
                 attention_masks.append(torch.tensor(attention_mask))
 
             # Convert lists to tensors and pad if necessary
             input_ids = pad_sequence(input_ids, batch_first=True).to(device)
             text_embeddings = self.model.get_input_embeddings()(input_ids)
-            combined_embeddings = self.fusion([non_text_embeddings, text_embeddings])
+            combined_embeddings = self.fusion([text_embeddings[:, :1, :], non_text_embeddings, text_embeddings[:, 1:, :]]).to(device)
+
             attention_masks = pad_sequence(attention_masks, batch_first=True).to(device)
 
             with torch.no_grad():
                 # Create attention mask for combined embeddings
                 outputs = self.model.generate(inputs_embeds=combined_embeddings.to(device), max_length=15, attention_mask=attention_masks)
             decoded_texts = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            print(decoded_texts)
             return decoded_texts
 
             
@@ -232,14 +211,7 @@ class TextFeatureOPTModel(nn.Module):
 
 
 def train(data, run_name):
-    
-    # if "t5" in LM_VERSION:
-    #     tokenizer = T5Tokenizer.from_pretrained(LM_VERSION)
-    
-    if "llama" in LM_VERSION:
-        tokenizer = LlamaTokenizer.from_pretrained(LM_VERSION)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(LM_VERSION)
+    tokenizer = AutoTokenizer.from_pretrained(LM_VERSION)
 
     tokenizer.pad_token = tokenizer.eos_token
     
@@ -252,12 +224,16 @@ def train(data, run_name):
     test_input, test_output = data.get_split(test_index)
     
     non_text_feature_modes = {'video': 'precomputed', 'audio': 'precomputed'}
-            
-    train_dataset = MMDataset(train_input, train_output, non_text_feature_modes, dataset_name, task_type, tokenizer)
+    #non_text_feature_modes = {'audio': 'precomputed'}
+        
+    if OVERFIT:
+        train_dataset = MMDataset(train_input[:50], train_output[:50], non_text_feature_modes, dataset_name, task_type, tokenizer)
+    else:
+        train_dataset = MMDataset(train_input, train_output, non_text_feature_modes, dataset_name, task_type, tokenizer)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, collate_fn = custom_collate_fn)
     
     if OVERFIT:
-        test_dataset = MMDataset(train_input[:100], train_output[:100], non_text_feature_modes, dataset_name, task_type, tokenizer)
+        test_dataset = MMDataset(train_input[:50], train_output[:50], non_text_feature_modes, dataset_name, task_type, tokenizer)
     else:
         test_dataset = MMDataset(test_input, test_output, non_text_feature_modes, dataset_name, task_type, tokenizer)
         
@@ -266,7 +242,11 @@ def train(data, run_name):
     # Example usage of data_loader in a training loop
     for batch in train_loader:
         features, labels, dataset_names, task_types = batch
-        print(len(features['text'][0]), features['video'].shape, features['audio'].shape, len(labels[0]))
+        print(len(features['text'][0]), len(labels[0]))
+        if 'video' in features.keys():
+            print(features['video'].shape)
+        if 'audio' in features.keys():
+            print(features['audio'].shape)
         break
     
     # prepare model
@@ -299,8 +279,7 @@ if __name__ == "__main__":
             if OVERFIT:
                 run_name += '_overfit'
                 
-            entity_name = 'rena-jzhang'  
-            wandb.init(project=project_name, entity=entity_name, name = run_name)
+            wandb.init(name=run_name)
             wandb.config = {
                 "learning_rate": LR,
                 "epochs": num_epochs,
@@ -310,4 +289,3 @@ if __name__ == "__main__":
             train(data, run_name)
         
             wandb.finish()
-    
