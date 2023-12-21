@@ -95,10 +95,13 @@ def proprocess_output(train_output, test_output, class_mapping):
 
 def prepare_optimizer(model, lr):
     trainable_params = []
+    for param in model.model.parameters():
+        if param.requires_grad:
+            trainable_params.append(param)
     for feature_type in model.feature_types:
-        embedding_transform = model.modules[feature_type]['embedding_transform']
-        if embedding_transform is not None:
-            for param in embedding_transform.parameters():
+        linear_projection = model.modules[feature_type]['linear_projection']
+        if linear_projection is not None:
+            for param in linear_projection.parameters():
                 if param.requires_grad:
                     trainable_params.append(param)
     optimizer = torch.optim.Adam(trainable_params, lr=lr)

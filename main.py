@@ -28,9 +28,9 @@ dataset_name, task_type = 'mustard', 'C'
 LM_VERSION = '../web-act/llm_ft/Mistral-7B-Instruct-v0.1'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-LR = 3e-2
+LR = 1e-4
 BATCH_SIZE = 2
-TEST_BATCH_SIZE = 1
+TEST_BATCH_SIZE = 4
 num_epochs = 20
 seeds = [
     42, 
@@ -40,59 +40,159 @@ seeds = [
 num_runs = 1
 OVERFIT = False
 
-class TextFeatureOPTModel(nn.Module):
+class MultiSenseModel(nn.Module):
     def __init__(self, model_name, non_text_feature_types, tokenizer, feature_modes):
-        super(TextFeatureOPTModel, self).__init__()
+        super(MultiSenseModel, self).__init__()
 
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
-            
-        # Freeze llm
-        for param in self.model.parameters():
-            param.requires_grad = False
-            
         self.feature_types = non_text_feature_types
         self.feature_modes = feature_modes 
         self.tokenizer = tokenizer
 
         # Initialize modules for different feature types
+        self.model = self.get_llm(model_name) 
         self.modules = defaultdict(nn.ModuleDict)
         for feature_type in self.feature_types:
             if feature_type == 'video':
-                if feature_modes.get(feature_type) == 'raw':
-                    video_encoder = resnet50(pretrained=True).to(device)
-                    video_encoder.fc = nn.Identity()
-
-                    # Freeze video encoder parameters
-                    for param in video_encoder.parameters():
-                        param.requires_grad = False
-
-                    self.modules[feature_type]['encoder'] = video_encoder
-
-                self.modules[feature_type]['embedding_transform'] = nn.Linear(2048, self.model.config.hidden_size).to(device)
+                if feature_modes.get(feature_type) == 'raw':     
+                    self.modules[feature_type]['encoder'] = self.video_encoder()
+                self.modules[feature_type]['linear_projection'] = nn.Linear(2048, self.model.config.hidden_size).to(device)
         
             elif feature_type == 'audio':
                 if feature_modes.get(feature_type) == 'raw':
-                    audio_encoder = nn.Sequential(
-                        nn.Conv1d(in_channels=1, out_channels=64, kernel_size=3),
-                        nn.ReLU(),
-                        nn.MaxPool1d(kernel_size=2),
-                    ).to(device)
+                    self.modules[feature_type]['encoder'] = self.get_audio_encoder()
+                self.modules[feature_type]['linear_projection'] = nn.Linear(283, self.model.config.hidden_size).to(device)
 
-                    # Freeze audio encoder parameters
-                    for param in audio_encoder.parameters():
-                        param.requires_grad = False
 
-                    self.modules[feature_type]['encoder'] = audio_encoder
+    def get_llm(self, model_name, frozen=False):
+        base_model = AutoModelForCausalLM.from_pretrained(model_name)
+        if frozen:
+            model = base_model
+            for param in model.parameters():
+                param.requires_grad = False
+        else:
+            from peft import get_peft_config, get_peft_model, LoraConfig, TaskType
+            lora_config = LoraConfig(
+                r=16,
+                target_modules=["q_proj", "v_proj"],
+                task_type=TaskType.CAUSAL_LM,
+                lora_alpha=32,
+                lora_dropout=0.05
+            )
+            model = get_peft_model(base_model, lora_config)
 
-                self.modules[feature_type]['embedding_transform'] = nn.Linear(283, self.model.config.hidden_size).to(device)
+        if model.config.pad_token_id is None and hasattr(model.config, 'eos_token_id'):
+            model.config.pad_token_id = model.config.eos_token_id
+        return model
+
+
+    def get_audio_encoder(self, frozen=True):
+        audio_encoder = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=64, kernel_size=3),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2),
+        ).to(device)
+
+        # Freeze audio encoder parameters
+        if frozen:
+            for param in audio_encoder.parameters():
+                param.requires_grad = False
+        return audio_encoder
+
+
+    def get_video_encoder(self, frozen=True):
+        video_encoder = resnet50(pretrained=True).to(device)
+        video_encoder.fc = nn.Identity()
+
+        # Freeze video encoder parameters
+        if frozen:
+            for param in video_encoder.parameters():
+                param.requires_grad = False
+        return video_encoder
+
 
     def tokenize(self, text_input):
         return self.tokenizer(text_input, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
-        
+
+
+    def patch_data(self, text_input, non_text_embeddings, labels=None):
+        if non_text_embeddings:
+            non_text_len = non_text_embeddings.shape[1]
+        else:
+            non_text_len = 0
+
+        input_ids = []
+        label_ids = []
+        attention_masks = []
+
+        for idx in range(len(text_input)):
+            question = text_input[idx]
+            answer = labels[idx] if labels else None
+
+            question_tokens = self.tokenizer.encode(
+                self.tokenizer.bos_token + question + self.tokenizer.eos_token, 
+                add_special_tokens=False
+            )
+            if answer:
+                answer_tokens = self.tokenizer.encode(
+                    self.tokenizer.bos_token + answer + self.tokenizer.eos_token, 
+                    add_special_tokens=False
+                )
+            else:
+                answer_tokens = self.tokenizer.encode(
+                    self.tokenizer.bos_token, 
+                    add_special_tokens=False
+                )
+            concatenated_tokens = question_tokens + answer_tokens
+
+            # Create labels for training (shift right and use -100 for question part)
+            label = [-100] * (non_text_len + len(question_tokens)) + answer_tokens
+
+            # Create attention mask
+            attention_mask = [1] * (len(concatenated_tokens) + non_text_len)
+
+            # Append to lists
+            input_ids.append(torch.tensor(concatenated_tokens))
+            label_ids.append(torch.tensor(label))
+            attention_masks.append(torch.tensor(attention_mask))
+
+        if labels:
+            return input_ids, label_ids, attention_masks
+        else:
+            return input_ids, attention_masks
+
+
+    def padding(self, input_ids=None, attention_masks=None, label_ids=None):
+        if input_ids:
+            reversed_input_ids = [input_id.flip(dims=[0]) for input_id in input_ids]
+            reversed_input_ids = pad_sequence(
+                reversed_input_ids, 
+                batch_first=True,
+                padding_value=0
+            ).to(device) 
+            input_ids = reversed_input_ids.flip(dims=[1])
+
+        if attention_masks:
+            reversed_attention_masks = [attention_mask.flip(dims=[0]) for attention_mask in attention_masks]
+            reversed_attention_masks = pad_sequence(
+                reversed_attention_masks, 
+                batch_first=True, 
+                padding_value=0
+            ).to(device)
+            attention_masks = reversed_attention_masks.flip(dims=[1])
+
+        if label_ids:
+            reversed_label_ids = [label_id.flip(dims=[0]) for label_id in label_ids]
+            reversed_label_ids = pad_sequence(
+                reversed_label_ids, 
+                batch_first=True, 
+                padding_value=-100
+            ).to(device)
+            label_ids = reversed_label_ids.flip(dims=[1])
+
+        return input_ids, label_ids, attention_masks
+
+
     def forward(self, features, device, labels=None):
-        # Set pad_token_id if it's not already set
-        if self.model.config.pad_token_id is None and hasattr(self.model.config, 'eos_token_id'):
-            self.model.config.pad_token_id = self.model.config.eos_token_id
 
         # Process non-text features
         feature_inputs = []
@@ -106,94 +206,90 @@ class TextFeatureOPTModel(nn.Module):
                     feature_input = encoder(non_text_feature)
                 feature_input = torch.flatten(feature_input, start_dim=1).float()
 
-                feature_embeddings = self.modules[feature_type]['embedding_transform'](feature_input)
+                feature_embeddings = self.modules[feature_type]['linear_projection'](feature_input)
                 feature_inputs.append(feature_embeddings.unsqueeze(1).to(device))
 
             elif mode == 'precomputed':
-                feature_embeddings = self.modules[feature_type]['embedding_transform'](non_text_feature.float())
+                feature_embeddings = self.modules[feature_type]['linear_projection'](non_text_feature.float())
                 feature_inputs.append(feature_embeddings.to(device))
 
-        text_input = features['text']
 
         # Process multimodal embeddings
         non_text_embeddings = self.fusion(feature_inputs)
-        non_text_len = non_text_embeddings.shape[1]
 
-        eos_token = self.tokenizer.eos_token
-        bos_token = self.tokenizer.bos_token
+        text_input = features['text']
+
         if labels is not None:
-            bos_token_id = self.tokenizer.bos_token_id  # Get the BOS token ID
-
-            input_ids = []
-            label_ids = []
-            attention_masks = []
-
-            for question, answer in zip(text_input, labels):
-                
-                # Tokenize and concatenate question and answer and add some multimodal features in the begininig
-                question_tokens = self.tokenizer.encode(question + eos_token, add_special_tokens=True)
-                answer_tokens = self.tokenizer.encode(answer + eos_token, add_special_tokens=True)
-                concatenated_tokens = question_tokens + answer_tokens
-
-                # Create labels for training (shift right and use -100 for question part)
-                label = [-100] * (non_text_len + len(question_tokens)) + answer_tokens
-
-                # Create attention mask
-                attention_mask = [1] * (len(concatenated_tokens) + non_text_len)
-
-                # Append to lists
-                input_ids.append(torch.tensor(concatenated_tokens))
-                label_ids.append(torch.tensor(label))
-                attention_masks.append(torch.tensor(attention_mask))
+            input_ids, label_ids, attention_masks = self.patch_data(
+                text_input=text_input, 
+                non_text_embeddings=non_text_embeddings, 
+                labels=labels
+            )
+            input_ids, label_ids, attention_masks = self.padding(
+                input_ids=input_ids, 
+                attention_masks=attention_masks, 
+                label_ids=label_ids
+            )
 
             # Convert lists to tensors and pad if necessary
-            input_ids = pad_sequence(input_ids, batch_first=True).to(device)
             text_embeddings = self.model.get_input_embeddings()(input_ids)
-            combined_embeddings = self.fusion([text_embeddings[:, :1, :], non_text_embeddings, text_embeddings[:, 1:, :]]).to(device)
-
-            label_ids = pad_sequence(label_ids, batch_first=True, padding_value=-100).to(device)
-            attention_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0).to(device)
-            #print(label_ids.shape, attention_masks.shape)
-            #print(label_ids[0], attention_masks[0])
+            fused_embeddings = self.fusion([
+                text_embeddings[:, :-1, :],
+                non_text_embeddings, 
+                text_embeddings[:, -1:, :]
+            ]).to(device)
+            #fused_embeddings = text_embeddings.to(device)
             
-            print(self.tokenizer.decode(input_ids[0], skip_special_tokens=False))
+            print(self.tokenizer.decode(
+                input_ids[0], 
+                skip_special_tokens=False
+            ))
             loss = self.model(
-                inputs_embeds=combined_embeddings, 
+                inputs_embeds=fused_embeddings, 
                 labels=label_ids, 
                 attention_mask=attention_masks, 
                 return_dict=True
             ).loss
-            print(loss)
             return loss
         
         else:
             # Prepare input for inference
-            bos_token_id = self.tokenizer.bos_token_id  # Get the BOS token ID
-            input_ids = []
-            attention_masks = []
+            input_ids, attention_masks = self.patch_data(
+                text_input=text_input, 
+                non_text_embeddings=non_text_embeddings, 
+                labels=labels
+            )
+            input_ids, _, attention_masks = self.padding(
+                input_ids=input_ids, 
+                attention_masks=attention_masks
+            )
 
-            for question in text_input:
-                # Tokenize and concatenate question and add BOS token
-                context_tokens = self.tokenizer.encode(question + eos_token + bos_token, add_special_tokens=True)
-
-                # Create attention mask
-                attention_mask = [1] * (len(context_tokens) + non_text_len)
-
-                # Append to lists
-                input_ids.append(torch.tensor(context_tokens))
-                attention_masks.append(torch.tensor(attention_mask))
-
-            # Convert lists to tensors and pad if necessary
-            input_ids = pad_sequence(input_ids, batch_first=True).to(device)
             text_embeddings = self.model.get_input_embeddings()(input_ids)
-            combined_embeddings = self.fusion([text_embeddings[:, :1, :], non_text_embeddings, text_embeddings[:, 1:, :]]).to(device)
+            fused_embeddings = self.fusion([
+                text_embeddings[:, :-1, :],
+                non_text_embeddings, 
+                text_embeddings[:, -1:, :]
+            ]).to(device)
+            #fused_embeddings = text_embeddings.to(device)
 
-            attention_masks = pad_sequence(attention_masks, batch_first=True).to(device)
-
+            print(self.tokenizer.decode(
+                input_ids[0], 
+                skip_special_tokens=False
+            ))
+            print(self.tokenizer.decode(
+                input_ids[-1], 
+                skip_special_tokens=False
+            ))
             with torch.no_grad():
-                # Create attention mask for combined embeddings
-                outputs = self.model.generate(inputs_embeds=combined_embeddings.to(device), max_length=15, attention_mask=attention_masks)
-            decoded_texts = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+                outputs = self.model.generate(
+                    inputs_embeds=fused_embeddings, 
+                    attention_mask=attention_masks,
+                    max_length=15, 
+                )
+                decoded_texts = self.tokenizer.batch_decode(
+                    outputs, 
+                    skip_special_tokens=True
+                )
             print(decoded_texts)
             return decoded_texts
 
@@ -203,17 +299,16 @@ class TextFeatureOPTModel(nn.Module):
     
     def print_gradients(self):
         print("Parameters Gradients:")
-        print('self.modules[audio][embedding_transform].bias.grad: ', self.modules["audio"]["embedding_transform"].bias.grad[:10])
+        print('self.modules[audio][linear_projection].bias.grad: ', self.modules["audio"]["linear_projection"].bias.grad[:10])
                     
     def print_param(self):
         print("Parameters:")
-        print('self.modules[audio][embedding_transform].bias: ', self.modules["audio"]["embedding_transform"].bias[:10])
+        print('self.modules[audio][linear_projection].bias: ', self.modules["audio"]["linear_projection"].bias[:10])
 
 
 def train(data, run_name):
     tokenizer = AutoTokenizer.from_pretrained(LM_VERSION)
 
-    tokenizer.pad_token = tokenizer.eos_token
     
     # Split
     all_indices = data.get_all_indices_shuffled()
@@ -224,7 +319,6 @@ def train(data, run_name):
     test_input, test_output = data.get_split(test_index)
     
     non_text_feature_modes = {'video': 'precomputed', 'audio': 'precomputed'}
-    #non_text_feature_modes = {'audio': 'precomputed'}
         
     if OVERFIT:
         train_dataset = MMDataset(train_input[:50], train_output[:50], non_text_feature_modes, dataset_name, task_type, tokenizer)
@@ -250,7 +344,7 @@ def train(data, run_name):
         break
     
     # prepare model
-    model = TextFeatureOPTModel(LM_VERSION, list(non_text_feature_modes.keys()), tokenizer, feature_modes=non_text_feature_modes).to(device)
+    model = MultiSenseModel(LM_VERSION, list(non_text_feature_modes.keys()), tokenizer, feature_modes=non_text_feature_modes).to(device)
     model.float() 
 
     print("Prepared model")
