@@ -114,8 +114,8 @@ class MultiSenseModel(nn.Module):
         return self.tokenizer(text_input, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
 
 
-    def patch_data(self, text_input, non_text_embeddings, labels=None):
-        if non_text_embeddings:
+    def patch_data(self, text_input, non_text_embeddings=None, labels=None):
+        if non_text_embeddings is not None:
             non_text_len = non_text_embeddings.shape[1]
         else:
             non_text_len = 0
