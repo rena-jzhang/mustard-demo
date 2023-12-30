@@ -11,20 +11,17 @@ def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
     model.eval() 
     predictions = []
     actuals = []
-
+    result_folder_name = None
     with torch.no_grad():
         progress_bar = tqdm(test_loader, desc='Evaluating', unit='batch')
 
         for batch in progress_bar:
-            features, labels, _, _ = batch
-            # label_ids = labels.to(device)
-
+            features, labels, dataset_name, _ = batch
+            result_folder_name = dataset_name[0]
             predicted = model(features, device)
-
             predictions.extend(predicted)            
-            # decoded_labels = model.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-            # actuals.extend(decoded_labels)
             actuals.extend(labels)
+            
     # Cdalculate accuracy, precision, recall, and F1 score
     actuals = [item.lower() for item in actuals]
     predictions = [postpros(res.lower()) for res in predictions]
@@ -39,7 +36,8 @@ def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
     wandb.log({"eval_accuracy": accuracy, "eval_precision": precision, "eval_recall": recall, "eval_f1": f1})
     
     # Save predictions and actuals to a file
-    folder_name = f"results/{run_name}"
+    folder_name = f"results/{result_folder_name}/{run_name}/"
+    
     if not os.path.exists(folder_name):
         os.makedirs(folder_name)
     if epoch is not None:
@@ -53,41 +51,76 @@ def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
         for pred, act in zip(predictions, actuals):
             writer.writerow([pred, act])
 
-def train_model(model, train_loader, test_loader, optimizer, device, num_epochs, checkpoint_path, run_name):
+def save_checkpoint(model, optimizer, epoch, filename):
+    # Create directory if it does not exist
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    state = {
+        'epoch': epoch,
+        'state_dict': model.state_dict(),
+        'optimizer': optimizer.state_dict()
+    }
+    torch.save(state, filename)
+    
+def train_model(model, train_loader, val_loader, test_loader, optimizer, device, num_epochs, checkpoint_path, run_name):
+    
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 
-    model.train()
-    best_loss = float('inf')
-    
-    for epoch in range(num_epochs):
-        total_loss = 0
-        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}', unit='batch')
+    best_val_loss = float('inf')
+    best_model_path = os.path.join(checkpoint_path, 'best_model.pth')
 
-        for batch in progress_bar:
+    for epoch in range(num_epochs):
+        # Training phase
+        model.train()
+        total_train_loss = 0
+        train_progress_bar = tqdm(train_loader, desc=f'Train Epoch {epoch+1}/{num_epochs}', unit='batch')
+
+        for batch in train_progress_bar:
             features, labels, dataset_names, task_types = batch
             optimizer.zero_grad()
             loss = model(features, device, labels)
-            total_loss += loss.item()
-
+            total_train_loss += loss.item()
             loss.backward()
             optimizer.step()
             
             del features, labels
             torch.cuda.empty_cache()
+            train_progress_bar.set_postfix({'loss': total_train_loss / len(train_progress_bar)})
 
-            progress_bar.set_postfix({'loss': total_loss / len(progress_bar)})
+        average_train_loss = total_train_loss / len(train_loader)
+        print(f'Epoch [{epoch+1}/{num_epochs}], Training Loss: {average_train_loss:.4f}')
+        wandb.log({"epoch": epoch, "train_loss": average_train_loss, "lr": optimizer.param_groups[0]['lr']})
 
-        average_loss = total_loss / len(train_loader)
-        print(f'Epoch [{epoch+1}/{num_epochs}], Training Loss: {average_loss:.4f}')
-        wandb.log({"epoch": epoch, "loss": average_loss, "lr": optimizer.param_groups[0]['lr']})
+       # Validation phase with progress bar
+        model.eval()
+        total_val_loss = 0
+        val_progress_bar = tqdm(val_loader, desc=f'Val Epoch {epoch+1}/{num_epochs}', unit='batch')
 
-        # if average_loss < best_loss:
-        #     best_loss = average_loss
-        #     checkpoint_filename = os.path.join(checkpoint_path, f'model_checkpoint_epoch_{epoch+1}.pth')
-        #     save_checkpoint(model, optimizer, epoch, checkpoint_filename)
-            
-        evaluate_model(model, test_loader, device, epoch, run_name)
-    
+        with torch.no_grad():
+            for batch in val_progress_bar:
+                features, labels, dataset_names, task_types = batch
+                val_loss = model(features, device, labels)
+                total_val_loss += val_loss.item()
+
+                del features, labels
+                torch.cuda.empty_cache()
+
+                val_progress_bar.set_postfix({'val_loss': total_val_loss / len(val_progress_bar)})
+
+        average_val_loss = total_val_loss / len(val_loader)
+        print(f'Epoch [{epoch+1}/{num_epochs}], Validation Loss: {average_val_loss:.4f}')
+        wandb.log({"val_loss": average_val_loss})
+
+        # Save the best model based on validation loss
+        if average_val_loss < best_val_loss:
+            best_val_loss = average_val_loss
+            torch.save(model.state_dict(), best_model_path)
+        
+        evaluate_model(model, test_loader, device, epoch, run_name)  # -1 indicates test evaluation
+
+    # Load the best model and evaluate on the test set
+    model.load_state_dict(torch.load(best_model_path))
+    evaluate_model(model, test_loader, device, None, run_name)  # -1 indicates test evaluation
+
 def proprocess_output(train_output, test_output, class_mapping):
     train_output = [class_mapping[i] for i in train_output]
     test_output = [class_mapping[i] for i in test_output]
@@ -98,7 +131,7 @@ def prepare_optimizer(model, lr):
     for param in model.model.parameters():
         if param.requires_grad:
             trainable_params.append(param)
-    for feature_type in model.feature_types:
+    for feature_type in model.modules.keys():
         linear_projection = model.modules[feature_type]['linear_projection']
         if linear_projection is not None:
             for param in linear_projection.parameters():
@@ -154,92 +187,7 @@ def gpu_monitor():
         print("CUDA is not available. No GPU detected.")
         
         
-def save_checkpoint(model, optimizer, epoch, filename):
-    # Create directory if it does not exist
-    # os.makedirs(os.path.dirname(filename), exist_ok=True)
-    state = {
-        'epoch': epoch,
-        'state_dict': model.state_dict(),
-        'optimizer': optimizer.state_dict()
-    }
-    torch.save(state, filename)
 
-
-# def evaluate_model(model, test_features, test_output, criterion, device):
-    # model.eval()  # Set the model to evaluation mode
-    # predictions = []
-
-    # with torch.no_grad():
-    #     # Wrap the range function with tqdm for a progress bar
-    #     progress_bar = tqdm(range(len(test_output)), desc='Evaluating', unit='batch')
-
-    #     for i in progress_bar:
-    #         text_input_ids = model.tokenize(test_features['text'][i])
-
-    #         non_text_feature_inputs = []
-    #         for feature_type in list(test_features.keys())[1:]:
-    #             non_text_feature_inputs.append(torch.tensor(test_features[feature_type][i]).to(device))
-
-    #         predicted = model(text_input_ids, non_text_feature_inputs, label_ids=None)
-
-    #         predictions.extend(predicted)
-
-    # accuracy = np.mean(np.array(predictions) == np.array(test_output))
-    # print(f'Test Accuracy: {accuracy:.4f}')
-    
-    # # Save predictions and actuals to a file
-    # with open('predictions_actuals.csv', 'w', newline='') as file:
-    #     writer = csv.writer(file)
-    #     writer.writerow(['Prediction', 'Actual'])
-    #     for pred, act in zip(predictions, test_output):
-    #         writer.writerow([pred, act])
-            
-    # return accuracy
-# def train_model(model, train_features, train_output, test_features, test_output, optimizer, criterion, device, num_epochs, checkpoint_path):
-    
-    # os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-
-    # model.train()
-    # best_loss = float('inf')
-    
-    # for epoch in range(num_epochs):
-    #     total_loss = 0
-
-    #     # Wrap the range function with tqdm for a progress bar
-    #     progress_bar = tqdm(range(len(train_output)), desc=f'Epoch {epoch+1}/{num_epochs}', unit='batch')
-
-    #     for i in progress_bar:
-    #         text_input_ids = model.tokenize(train_features['text'][i])
-    #         label_ids = model.tokenize(train_output[i])
-
-    #         # Prepare non-text features
-    #         non_text_feature_inputs = []
-    #         if len(train_features.keys()) > 1:
-    #             for feature_type in list(train_features.keys())[1:]:
-    #                 non_text_feature_inputs.append(torch.tensor(train_features[feature_type][i]).to(device))
-                    
-    #         optimizer.zero_grad()
-    #         loss = model(text_input_ids, non_text_feature_inputs, label_ids)
-    #         total_loss += loss.item()
-
-    #         loss.backward()
-    #         optimizer.step()
-    #         del text_input_ids, non_text_feature_inputs, label_ids
-    #         torch.cuda.empty_cache()
-
-    #         # Update progress bar
-    #         progress_bar.set_postfix({'loss': total_loss / (i + 1)})
-
-    #     average_loss = total_loss / len(train_output)
-    #     print(f'Epoch [{epoch+1}/{num_epochs}], Training Loss: {average_loss:.4f}')
-
-    #     # Save checkpoint if it's the best model so far
-    #     if average_loss < best_loss:
-    #         best_loss = average_loss
-    #         checkpoint_filename = os.path.join(checkpoint_path, f'model_checkpoint_epoch_{epoch+1}.pth')
-    #         save_checkpoint(model, optimizer, epoch, checkpoint_filename)
-            
-    #     accuracy = evaluate_model(model, test_features, test_output, criterion, device)
 
 def train_io(config, data, train_index, test_index):
     

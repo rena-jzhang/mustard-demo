@@ -12,3 +12,5 @@ pandas
 opencv-python-headless
 tqdm
 gpustat
+peft
+librosa
