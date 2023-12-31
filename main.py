@@ -419,7 +419,6 @@ def train(data, run_name, dataset_name):
         
     # test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, shuffle=False, num_workers=4, collate_fn = custom_collate_fn)
     
- 
     # Creating datasets
     if OVERFIT:
         train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, nrows=10)
@@ -433,6 +432,7 @@ def train(data, run_name, dataset_name):
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=custom_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
+    import pdb; pdb.set_trace()
 
     
     # Example usage of data_loader in a training loop

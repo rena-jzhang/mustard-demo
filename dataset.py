@@ -10,9 +10,18 @@ import os
 
 class MMIDataset(Dataset):
     # Multi-modal Individual Dataset
-    def __init__(self, feature_list, data_type: str, dataset_name: str, dataset_rootdir: str = '../meta/',
-                 data_split=None, nrows: int = -1, filter_dim_coordination=False, sample_frac: float = 1.0,
-                 slice_range: tuple = None):
+    def __init__(
+        self, 
+        feature_list, 
+        data_type: str, 
+        dataset_name: str, 
+        dataset_rootdir: str = '../meta/',
+        data_split=None, 
+        nrows: int = -1, 
+        filter_dim_coordination=False, 
+        sample_frac: float = 1.0,
+        slice_range: tuple = None
+    ):
         
         eps = 1e-5
         # assert dataset_name in ALL_DATASETS
