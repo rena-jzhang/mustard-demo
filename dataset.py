@@ -16,7 +16,7 @@ class MMIDataset(Dataset):
         data_type: str, 
         dataset_name: str, 
         dataset_rootdir: str = '../meta/',
-        data_split=None, 
+        data_split=[0], 
         nrows: int = -1, 
         filter_dim_coordination=False, 
         sample_frac: float = 1.0,
@@ -35,16 +35,19 @@ class MMIDataset(Dataset):
         #     dataset_rootdir = dataset_rootdir.replace('meta', 'meta_iemocap')
 
         # Dynamically identify files that match the pattern
-        file_pattern = f'_{data_type}.csv'
-        all_files = os.listdir(dataset_rootdir)
-        dataset_files = [file for file in all_files if file.startswith(dataset_name) and file.endswith(file_pattern)]
-
+        # file_pattern = f'_{data_type}.csv'
+        # all_files = os.listdir(dataset_rootdir)
+        # dataset_files = [file for file in all_files if file.startswith(dataset_name) and file.endswith(file_pattern)]
+        # print(dataset_files)
         # Read the identified files into DataFrame(s)
-        if nrows <= 0:
-            df_list = [pd.read_csv(os.path.join(dataset_rootdir, file)) for file in dataset_files]
-        else:
-            df_list = [pd.read_csv(os.path.join(dataset_rootdir, file), nrows=nrows) for file in dataset_files]
-
+        dataset_files = [dataset_rootdir + dataset_name + f'_{idx}_{data_type}.csv'
+                   for idx in data_split]
+                   
+        df_list = [pd.read_csv(dataset_file)
+                   for dataset_file in dataset_files] if nrows <= 0 else \
+                  [pd.read_csv(dataset_file, nrows=nrows)
+                   for dataset_file in dataset_files]
+                  
         df = pd.concat(df_list, ignore_index=True)
         
         # df = df[slice_range[0]:slice_range[1]] if slice_range is not None else df

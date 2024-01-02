@@ -60,10 +60,10 @@ ALL_DATASETS = [
             # 'vreed_av',
 
     # 'iemocap_valence', 'iemocap_arousal',
-                'recola_valence', 
-                'recola_arousal', 
+                # 'recola_valence', 
+                # 'recola_arousal', 
                 # 'sewa_valence', 'sewa_arousal', 'mosi_sentiment',
-                # 'mosei_sentiment', 'mosei_happiness',
+                'mosei_sentiment', 'mosei_happiness',
                 ]
 
 MODALITY_DATASET = {

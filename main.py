@@ -432,8 +432,7 @@ def train(data, run_name, dataset_name):
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=custom_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
-    import pdb; pdb.set_trace()
-
+    
     
     # Example usage of data_loader in a training loop
     for batch in train_loader:

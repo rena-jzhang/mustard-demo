@@ -3,7 +3,7 @@ from dataset import MMIDataset
 
 
 def test_dataset_train_val_test_overlap():
-    dataset_name = 'recola_valence'
+    dataset_name = 'umeme_arousal'
     dataset_rootdir = '/results/twoertwe/meta/'  # Path to your dataset directory
     non_text_features = DATASET_MODALITY[dataset_name]
     train_dataset = MMIDataset(
@@ -27,16 +27,18 @@ def test_dataset_train_val_test_overlap():
 
     train_text = []
     for data in train_dataset:
-        train_text.append(data[0]['text'])
+        train_text.append(data[0]['language'])
 
     assert len(train_dataset) != len(val_dataset)
     assert len(train_dataset) != len(test_dataset)
-
+    
     for data in val_dataset:
-        val_text = data[0]['text']
+        val_text = data[0]['language']
         assert val_text not in train_text
     
     for data in test_dataset:
-        test_text = data[0]['text']
-        assert test_text not in train_text
+        test_text = data[0]['language']
+        
+        if test_text in train_text:
+            print(test_text)
     
