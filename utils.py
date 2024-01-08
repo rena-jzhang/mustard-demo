@@ -1,11 +1,47 @@
-
-import torch
-import os
 import csv
+import os
+
+import numpy as np
+import pandas as pd
+import torch
+from scipy.stats import pearsonr
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error
 from tqdm import tqdm
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import wandb
 
+
+def calculate_metrics(true_values, predicted_values):
+    """
+    Calculate CCC, RMSE, and PCC.
+    :param true_values: Array of true values
+    :param predicted_values: Array of predicted values
+    :return: Concordance Correlation Coefficient, Root Mean Squared Error, Pearson Correlation Coefficient
+    """
+    # Convert non-numeric values to NaN
+    true_values = pd.to_numeric(true_values, errors='coerce')
+    predicted_values = pd.to_numeric(predicted_values, errors='coerce')
+    
+    # Remove or impute NaNs (or use np.nanmean, np.nanvar, etc., to handle NaNs)
+    valid_indices = ~np.isnan(true_values) & ~np.isnan(predicted_values)
+    true_values = true_values[valid_indices]
+    predicted_values = predicted_values[valid_indices]
+
+    # Calculate CCC
+    mean_true = np.mean(true_values)
+    mean_predicted = np.mean(predicted_values)
+    var_true = np.var(true_values)
+    var_predicted = np.var(predicted_values)
+    pearson_corr, _ = pearsonr(true_values, predicted_values)
+    ccc = (2 * pearson_corr * np.sqrt(var_true) * np.sqrt(var_predicted)) / \
+          (var_true + var_predicted + (mean_true - mean_predicted) ** 2)
+
+    # Calculate RMSE
+    rmse = np.sqrt(mean_squared_error(true_values, predicted_values))
+
+    # PCC is the Pearson Correlation Coefficient
+    pcc = pearson_corr
+
+    return ccc, rmse, pcc
 
 def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
     model.eval() 
@@ -22,18 +58,32 @@ def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
             predictions.extend(predicted)            
             actuals.extend(labels)
             
-    # Cdalculate accuracy, precision, recall, and F1 score
+    # Calculate accuracy, precision, recall, and F1 score
     actuals = [item.lower() for item in actuals]
-    predictions = [postpros(res.lower()) for res in predictions]
+    predictions = [res.lower() for res in predictions]
     accuracy = accuracy_score(actuals, predictions)
     precision = precision_score(actuals, predictions, average='macro')
     recall = recall_score(actuals, predictions, average='macro')
     f1 = f1_score(actuals, predictions, average='macro')
+    ccc, rmse, pcc = calculate_metrics(actuals, predictions)
+    
     print(f'Test Accuracy: {accuracy:.4f}')
     print(f'Precision: {precision:.4f}')
     print(f'Recall: {recall:.4f}')
     print(f'F1 Score: {f1:.4f}')
-    wandb.log({"eval_accuracy": accuracy, "eval_precision": precision, "eval_recall": recall, "eval_f1": f1})
+    print(f'CCC: {ccc:.4f}')
+    print(f'RMSE: {rmse:.4f}')
+    print(f'PCC: {pcc:.4f}')
+    
+    wandb.log({
+        "eval_accuracy": accuracy, 
+        "eval_precision": precision, 
+        "eval_recall": recall, 
+        "eval_f1": f1,
+        "eval_ccc": ccc,
+        "eval_rmse": rmse,
+        "eval_pcc": pcc
+    })
     
     # Save predictions and actuals to a file
     folder_name = f"results/{result_folder_name}/{run_name}/"
@@ -52,7 +102,6 @@ def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
             writer.writerow([pred, act])
 
 def save_checkpoint(model, optimizer, epoch, filename):
-    # Create directory if it does not exist
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     state = {
         'epoch': epoch,
@@ -90,7 +139,7 @@ def train_model(model, train_loader, val_loader, test_loader, optimizer, device,
         print(f'Epoch [{epoch+1}/{num_epochs}], Training Loss: {average_train_loss:.4f}')
         wandb.log({"epoch": epoch, "train_loss": average_train_loss, "lr": optimizer.param_groups[0]['lr']})
 
-       # Validation phase with progress bar
+        # Validation phase with progress bar
         model.eval()
         total_val_loss = 0
         val_progress_bar = tqdm(val_loader, desc=f'Val Epoch {epoch+1}/{num_epochs}', unit='batch')
@@ -110,16 +159,16 @@ def train_model(model, train_loader, val_loader, test_loader, optimizer, device,
         print(f'Epoch [{epoch+1}/{num_epochs}], Validation Loss: {average_val_loss:.4f}')
         wandb.log({"val_loss": average_val_loss})
 
-        # Save the best model based on validation loss
-        if average_val_loss < best_val_loss:
-            best_val_loss = average_val_loss
-            torch.save(model.state_dict(), best_model_path)
+        # # Save the best model based on validation loss
+        # if average_val_loss < best_val_loss:
+        #     best_val_loss = average_val_loss
+        #     torch.save(model.state_dict(), best_model_path)
         
         evaluate_model(model, test_loader, device, epoch, run_name)  # -1 indicates test evaluation
 
-    # Load the best model and evaluate on the test set
-    model.load_state_dict(torch.load(best_model_path))
-    evaluate_model(model, test_loader, device, None, run_name)  # -1 indicates test evaluation
+    # # Load the best model and evaluate on the test set
+    # model.load_state_dict(torch.load(best_model_path))
+    # evaluate_model(model, test_loader, device, None, run_name)  # -1 indicates test evaluation
 
 def proprocess_output(train_output, test_output, class_mapping):
     train_output = [class_mapping[i] for i in train_output]

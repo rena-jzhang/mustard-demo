@@ -23,11 +23,12 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 dataset_rootdir = '/results/twoertwe/meta/'  # Path to your dataset directory
 
-
 # LM_VERSION = 'google/flan-t5-xxl'
 # LM_VERSION = 't5-small'
-LM_VERSION = 'gpt2'
+# LM_VERSION = 'gpt2'
 # LM_VERSION = '../llama/llama-2-7b-hf'
+LM_VERSION = 'llama-2-7b-hf'
+
 # LM_VERSION = '../web-act/llm_ft/Mistral-7B-Instruct-v0.1'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -47,17 +48,13 @@ OVERFIT = False
 TEXT_ONLY = False
 NO_TEXT = False
 
-# LR = 1e-4
-# BATCH_SIZE = 2
-# TEST_BATCH_SIZE = 4
-
 if FROZEN_LLM:
     LR = 1e-3
 else:
     LR = 1e-4
     
 BATCH_SIZE = 2
-TEST_BATCH_SIZE = 32
+TEST_BATCH_SIZE = 64
 
 class MultiSenseModel(nn.Module):
     def __init__(self, model_name, non_text_feature_types, tokenizer, feature_modes, feature_dims):
@@ -399,9 +396,7 @@ def train(data, run_name, dataset_name):
         if NO_TEXT:
             non_text_features.remove('language')
             
-            
     print('NON TEXT FEATURES: ', non_text_features)
-
         
     non_text_feature_modes = dict([(feature_type, 'precomputed') for feature_type in non_text_features])
             
