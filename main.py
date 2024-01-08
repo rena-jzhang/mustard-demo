@@ -21,13 +21,14 @@ import wandb
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-dataset_rootdir = '/results/twoertwe/meta/'  # Path to your dataset directory
-
+# dataset_rootdir = '/results/twoertwe/meta/'  # Path to your dataset directory
+dataset_rootdir = '/root/social_datasets/'
 # LM_VERSION = 'google/flan-t5-xxl'
 # LM_VERSION = 't5-small'
 # LM_VERSION = 'gpt2'
 # LM_VERSION = '../llama/llama-2-7b-hf'
-LM_VERSION = 'llama-2-7b-hf'
+# LM_VERSION = 'llama-2-7b-hf'
+LM_VERSION = 'meta-llama/Llama-2-7b-hf'
 
 # LM_VERSION = '../web-act/llm_ft/Mistral-7B-Instruct-v0.1'
 
@@ -465,7 +466,7 @@ if __name__ == "__main__":
     print("Before running")
     gpu_monitor()
     
-    data = DataPreper(config)
+    data = None
     for seed in seeds:
         torch.manual_seed(seed)
         for i in range(num_runs):
