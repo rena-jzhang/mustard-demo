@@ -53,7 +53,7 @@ class MMIDataset(Dataset):
         # df = df[slice_range[0]:slice_range[1]] if slice_range is not None else df
         # df = df.sample(frac=sample_frac, random_state=1706)
 
-        features = [ft for ft in df.columns if not (ft.startswith('meta') or ft == 'y')]
+        features = [ft for ft in df.columns if not (ft.startswith('meta') or ft == 'y' or ft == 'sentence')]
         data = df[features]
         data = data.dropna(axis='columns')
         data = (data - data.mean()) / (data.std() + eps)
@@ -87,9 +87,10 @@ class MMIDataset(Dataset):
         print(f"size: {self.dataset_size}")
         
         self.all_modalities.append('text')
-        task_instruction = DATASET_INSTRUCTION[dataset_name]
-        self.data['text'] = [task_instruction] * self.dataset_size
-        
+        task_instruction = DATASET_INSTRUCTION[dataset_name] 
+        # self.data['text'] = [task_instruction] * self.dataset_size
+        self.data['text'] = [ sent + " " + task_instruction for sent in list(df['sentence'])]
+
         print()
 
     def __len__(self):

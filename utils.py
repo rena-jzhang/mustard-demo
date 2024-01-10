@@ -31,12 +31,30 @@ def calculate_metrics(true_values, predicted_values):
     mean_predicted = np.mean(predicted_values)
     var_true = np.var(true_values)
     var_predicted = np.var(predicted_values)
-    pearson_corr, _ = pearsonr(true_values, predicted_values)
-    ccc = (2 * pearson_corr * np.sqrt(var_true) * np.sqrt(var_predicted)) / \
-          (var_true + var_predicted + (mean_true - mean_predicted) ** 2)
+    
+    # Check for Pearson correlation and CCC
+    if len(true_values) < 2 or len(predicted_values) < 2 or np.std(true_values) == 0 or np.std(predicted_values) == 0:
+        # Handle edge case for insufficient data or zero variance
+        pearson_corr = 0
+        ccc = 0
+    else:
+        # Calculate Pearson correlation
+        pearson_corr, _ = pearsonr(true_values, predicted_values)
 
-    # Calculate RMSE
-    rmse = np.sqrt(mean_squared_error(true_values, predicted_values))
+        # Handle potential division by zero in CCC calculation
+        denominator = (var_true + var_predicted + (mean_true - mean_predicted) ** 2)
+        if denominator == 0:
+            ccc = 0
+        else:
+            ccc = (2 * pearson_corr * np.sqrt(var_true) * np.sqrt(var_predicted)) / denominator
+
+    # Check for RMSE
+    if len(true_values) == 0 or len(predicted_values) == 0 or len(true_values) != len(predicted_values):
+        # Handle edge case for empty arrays or arrays of different lengths
+        rmse = 0
+    else:
+        # Calculate Root Mean Squared Error
+        rmse = np.sqrt(mean_squared_error(true_values, predicted_values))
 
     # PCC is the Pearson Correlation Coefficient
     pcc = pearson_corr

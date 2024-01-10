@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=muvi_test
+#SBATCH --job-name=muvi_test_small
 #SBATCH --ntasks=1
 #SBATCH --time=72:00:00
 #SBATCH --gres=gpu:1                # Request 1 GPU, modify if more GPUs are needed

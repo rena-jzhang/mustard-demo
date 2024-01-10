@@ -22,25 +22,26 @@ import wandb
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # dataset_rootdir = '/results/twoertwe/meta/'  # Path to your dataset directory
-dataset_rootdir = '/root/social_datasets/'
+dataset_rootdir = '/work/jingyiz4/cleaned_data/'
+
 # LM_VERSION = 'google/flan-t5-xxl'
 # LM_VERSION = 't5-small'
-# LM_VERSION = 'gpt2'
+LM_VERSION = 'gpt2'
 # LM_VERSION = '../llama/llama-2-7b-hf'
 # LM_VERSION = 'llama-2-7b-hf'
-LM_VERSION = 'meta-llama/Llama-2-7b-hf'
-
+# LM_VERSION = 'meta-llama/Llama-2-7b-hf'
 # LM_VERSION = '../web-act/llm_ft/Mistral-7B-Instruct-v0.1'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-num_epochs = 30
+num_epochs = 10
 seeds = [
     42, 
-    # 2023, 
-    # 2024
+    2023, 
+    2024
     ]
-num_runs = 1
+num_runs = 2
+
 
 FROZEN_LLM = False
 
@@ -294,17 +295,7 @@ class MultiSenseModel(nn.Module):
             label_ids = torch.cat([constant_label_ids, label_ids], dim=1)
             
             attention_masks = torch.cat([constant_attention_masks, attention_masks], dim=1)
-            #fused_embeddings = text_embeddings.to(device)
-            
-            #print(self.tokenizer.decode(
-            #    input_ids[0], 
-            #    skip_special_tokens=False
-            #))
-                        
-            # print('LABEL: ',label_ids[:5])
-            # exit()
-            # print('Decoded LABELS: ', decoded_texts)
-            
+
             loss = self.model(
                 inputs_embeds=fused_embeddings, 
                 labels=label_ids, 
@@ -336,16 +327,7 @@ class MultiSenseModel(nn.Module):
             non_text_len = non_text_embeddings.shape[1]
             constant_attention_masks = torch.full((attention_masks.shape[0], non_text_len), 1).to(device)
             attention_masks = torch.cat([constant_attention_masks, attention_masks], dim=1)
-            #fused_embeddings = text_embeddings.to(device)
 
-            #print(self.tokenizer.decode(
-            #    input_ids[0], 
-            #    skip_special_tokens=False
-            #))
-            #print(self.tokenizer.decode(
-            #    input_ids[-1], 
-            #    skip_special_tokens=False
-            #))
             with torch.no_grad():
                 outputs = self.model.generate(
                     inputs_embeds=fused_embeddings, 
@@ -353,14 +335,11 @@ class MultiSenseModel(nn.Module):
                     max_length=15, 
                 )
                 
-                # print("Predicted Token IDs:", outputs[:5])
-
                 decoded_texts = self.tokenizer.batch_decode(
                     outputs, 
                     skip_special_tokens=True
                 )
             return decoded_texts
-
             
     def fusion(self, multimodal_embeddings):
         return torch.cat(multimodal_embeddings, dim=1)
@@ -374,7 +353,7 @@ class MultiSenseModel(nn.Module):
         print('self.modules[audio][linear_projection].bias: ', self.modules["audio"]["linear_projection"].bias[:10])
 
 
-def train(data, run_name, dataset_name):
+def train(data, run_name, dataset_name, run_id):
     if 'llama' in LM_VERSION:
         tokenizer = LlamaTokenizer.from_pretrained(LM_VERSION)
     else:
@@ -391,11 +370,14 @@ def train(data, run_name, dataset_name):
         
     non_text_features = DATASET_MODALITY[dataset_name]
     
-    if TEXT_ONLY:
-        non_text_features = ['language']
-    else:
-        if NO_TEXT:
-            non_text_features.remove('language')
+    if 'language' in non_text_features:
+        non_text_features.remove('language')
+    
+    # if TEXT_ONLY:
+    #     non_text_features = ['language']
+    # else:
+    #     if NO_TEXT:
+    #         non_text_features.remove('language')
             
     print('NON TEXT FEATURES: ', non_text_features)
         
@@ -417,13 +399,13 @@ def train(data, run_name, dataset_name):
     
     # Creating datasets
     if OVERFIT:
-        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, nrows=10)
+        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, nrows=50, data_split=[run_id])
         val_dataset = train_dataset
         test_dataset = train_dataset
     else:
-        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir)
-        val_dataset = MMIDataset(feature_list=non_text_features, data_type='validation', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir)
-        test_dataset = MMIDataset(feature_list=non_text_features, data_type='test', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir)
+        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id])
+        val_dataset = MMIDataset(feature_list=non_text_features, data_type='validation', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id])
+        test_dataset = MMIDataset(feature_list=non_text_features, data_type='test', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id])
         
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=custom_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
@@ -431,7 +413,7 @@ def train(data, run_name, dataset_name):
     
     
     # Example usage of data_loader in a training loop
-    for batch in train_loader:
+    for batch in test_loader:
         features, labels, dataset_names, task_types = batch
         print('FEATURES IN LOADER: ', features.keys())
         # print(len(features['text'][0]), len(labels[0]))
@@ -497,6 +479,6 @@ if __name__ == "__main__":
                     "batch_size": BATCH_SIZE
                 }
 
-                train(data, run_name, dataset_name = dataset_name)
+                train(data, run_name, dataset_name = dataset_name, run_id = i)
             
                 wandb.finish()
