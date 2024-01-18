@@ -22,26 +22,25 @@ import wandb
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # dataset_rootdir = '/results/twoertwe/meta/'  # Path to your dataset directory
-dataset_rootdir = '/work/jingyiz4/cleaned_data/'
+dataset_rootdir = '/work/jingyiz4/new_cleaned_data/'
 
 # LM_VERSION = 'google/flan-t5-xxl'
 # LM_VERSION = 't5-small'
-LM_VERSION = 'gpt2'
+# LM_VERSION = 'gpt2'
 # LM_VERSION = '../llama/llama-2-7b-hf'
 # LM_VERSION = 'llama-2-7b-hf'
-# LM_VERSION = 'meta-llama/Llama-2-7b-hf'
+LM_VERSION = 'meta-llama/Llama-2-7b-hf'
 # LM_VERSION = '../web-act/llm_ft/Mistral-7B-Instruct-v0.1'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-num_epochs = 10
+num_epochs = 15
 seeds = [
     42, 
     2023, 
     2024
     ]
 num_runs = 2
-
 
 FROZEN_LLM = False
 
@@ -54,12 +53,17 @@ if FROZEN_LLM:
     LR = 1e-3
 else:
     LR = 1e-4
+    # LR = 1e-3
     
 BATCH_SIZE = 2
 TEST_BATCH_SIZE = 64
 
+# PRED_MODE = 'seq2seq' 
+
+PRED_MODE = 'pred_head' 
+
 class MultiSenseModel(nn.Module):
-    def __init__(self, model_name, non_text_feature_types, tokenizer, feature_modes, feature_dims):
+    def __init__(self, model_name, non_text_feature_types, tokenizer, feature_modes, feature_dims, pred_mode, task_type = 'regression'):
         super(MultiSenseModel, self).__init__()
 
         self.feature_types = non_text_feature_types
@@ -67,13 +71,23 @@ class MultiSenseModel(nn.Module):
         self.feature_modes = feature_modes 
         self.tokenizer = tokenizer
 
-        # Initialize modules for different feature types
         self.model = self.get_llm(model_name, frozen = FROZEN_LLM) 
         self.modules = defaultdict(nn.ModuleDict)
-        
+
         for feature_type in self.feature_types:
             self.modules[feature_type]['linear_projection'] = nn.Linear(feature_dims[feature_type], self.model.config.hidden_size).to(device)
-        
+
+        # Add the prediction head if not a seq2seq
+        self.task_type = task_type
+        self.mode = pred_mode
+
+        if self.mode == 'pred_head':
+            if self.task_type == 'classification':
+                self.output_layer = torch.nn.Linear(self.model.config.vocab_size, 4)
+            
+            elif self.task_type == 'regression':
+                self.output_layer = torch.nn.Linear(self.model.config.vocab_size, 1)
+            
     def get_llm(self, model_name, frozen=False):
         if 'llama' in model_name:
             base_model = LlamaForCausalLM.from_pretrained(model_name)
@@ -147,6 +161,7 @@ class MultiSenseModel(nn.Module):
                 self.tokenizer.bos_token + question + self.tokenizer.eos_token, 
                 add_special_tokens=False
             )
+            
             if answer:
                 answer_tokens = self.tokenizer.encode(
                     self.tokenizer.bos_token + answer + self.tokenizer.eos_token, 
@@ -157,7 +172,6 @@ class MultiSenseModel(nn.Module):
                     self.tokenizer.bos_token, 
                     add_special_tokens=False
                 )
-                
             
             concatenated_tokens = question_tokens + answer_tokens
 
@@ -176,7 +190,6 @@ class MultiSenseModel(nn.Module):
             return input_ids, label_ids, attention_masks
         else:
             return input_ids, attention_masks
-
 
     def padding(self, input_ids=None, attention_masks=None, label_ids=None):
         if input_ids:
@@ -198,7 +211,6 @@ class MultiSenseModel(nn.Module):
             attention_masks = reversed_attention_masks.flip(dims=[1])
 
         if label_ids:
-            # print('BEFORE', label_ids)
             reversed_label_ids = [label_id.flip(dims=[0]) for label_id in label_ids]
             reversed_label_ids = pad_sequence(
                 reversed_label_ids, 
@@ -207,7 +219,6 @@ class MultiSenseModel(nn.Module):
             ).to(device)
             label_ids = reversed_label_ids.flip(dims=[1])
             
-            # print('AFTER', label_ids)
         return input_ids, label_ids, attention_masks
 
 
@@ -229,8 +240,7 @@ class MultiSenseModel(nn.Module):
                 feature_inputs.append(feature_embeddings.unsqueeze(1).to(device))
 
             elif mode == 'precomputed':
-                # feature_embeddings = non_text_feature.float()
-                # if feature_type != 'language':
+
                 feature_embeddings = self.modules[feature_type]['linear_projection'](non_text_feature.float())
                 if len(feature_embeddings.shape) == 2:
                     feature_embeddings = feature_embeddings.unsqueeze(1)
@@ -238,74 +248,83 @@ class MultiSenseModel(nn.Module):
 
         non_text_embeddings = self.fusion(feature_inputs)
 
-        # process text feature 
         text_input = features['text']
-        if labels is not None:
-            
-            # # Tokenize each text and print the results
-            # label_ids = []
-            # for text in labels[:5]:
-            #     tokens = self.tokenizer.tokenize(text)
-            #     token_ids = self.tokenizer.convert_tokens_to_ids(tokens)
-            #     label_ids.append(token_ids)
-            #     print(f"Text: {text}")
-            #     print(f"Tokens: {tokens}")
-            #     print(f"Token IDs: {token_ids}")
-            #     print()
-                
-            # decoded_texts = self.tokenizer.batch_decode(
-            #                     label_ids, 
-            #         skip_special_tokens=True
-            # )
-            # print('SKIP: ', decoded_texts)
-                
-            # decoded_texts = self.tokenizer.batch_decode(
-            #                     label_ids, 
-            #         skip_special_tokens=False
-            # )
-            # print('NON SKIP: ', decoded_texts)
-            # exit()
-            
-            
-            input_ids, label_ids, attention_masks = self.patch_data(
-                text_input=text_input, 
-                labels=labels
-            )
-            
-            input_ids, label_ids, attention_masks = self.padding(
-                input_ids=input_ids, 
-                attention_masks=attention_masks, 
-                label_ids=label_ids
-            )
 
-            # Convert lists to tensors and pad if necessary
+        if labels is not None:
+            labels = labels.to(device)
+            
+            if self.mode == 'seq2seq':
+                input_ids, label_ids, attention_masks = self.patch_data(
+                    text_input=text_input, 
+                    labels=labels
+                )
+                
+                input_ids, label_ids, attention_masks = self.padding(
+                    input_ids=input_ids, 
+                    attention_masks=attention_masks, 
+                    label_ids=label_ids
+                )
+
+            else: 
+
+                input_ids, attention_masks = self.patch_data(
+                    text_input=text_input, 
+                    labels=None
+                )
+                input_ids, _, attention_masks = self.padding(
+                    input_ids=input_ids, 
+                    attention_masks=attention_masks
+                )
+
             text_embeddings = self.model.get_input_embeddings()(input_ids)
-            
-            # Add projection also for text
-            # text_embeddings = self.modules['text']['linear_projection'](text_embeddings)
-            
             fused_embeddings = self.fusion([
                 non_text_embeddings, 
                 text_embeddings
             ]).to(device)
             
             non_text_len = non_text_embeddings.shape[1]
-            constant_label_ids = torch.full((label_ids.shape[0], non_text_len), -100).to(device)
             constant_attention_masks = torch.full((attention_masks.shape[0], non_text_len), 1).to(device)
-            label_ids = torch.cat([constant_label_ids, label_ids], dim=1)
-            
             attention_masks = torch.cat([constant_attention_masks, attention_masks], dim=1)
 
-            loss = self.model(
-                inputs_embeds=fused_embeddings, 
-                labels=label_ids, 
-                attention_mask=attention_masks, 
-                return_dict=True
-            ).loss
+            # if seq2seq then process the label texts
+            if self.mode == 'seq2seq':
+
+                constant_label_ids = torch.full((label_ids.shape[0], non_text_len), -100).to(device)
+                label_ids = torch.cat([constant_label_ids, label_ids], dim=1)
+
+                loss = self.model(
+                    inputs_embeds=fused_embeddings, 
+                    labels=label_ids, 
+                    attention_mask=attention_masks, 
+                    return_dict=True
+                ).loss
+                        
+            else:
+                
+                outputs = self.model(
+                    inputs_embeds=fused_embeddings, 
+                    attention_mask=attention_masks, 
+                    return_dict=True
+                )
+
+                last_hidden_state = outputs.logits[:, -1]  
+
+                output = self.output_layer(last_hidden_state)  # Shape: [batch_size, 1]
+
+                if self.task_type == 'regression':
+                    output = output.flatten()
+                    # loss_fct = get_loss_function('mae+corr') 
+                    loss_fct = get_loss_function('mse') 
+
+                else:
+                    loss_fct = get_loss_function('ce')
+
+                loss = loss_fct(labels, output)
+
             return loss
         
         else:
-            # Prepare input for inference
+
             input_ids, attention_masks = self.patch_data(
                 text_input=text_input, 
                 labels=None
@@ -317,8 +336,6 @@ class MultiSenseModel(nn.Module):
 
             text_embeddings = self.model.get_input_embeddings()(input_ids)
             
-            # text_embeddings = self.modules['text']['linear_projection'](text_embeddings)
-
             fused_embeddings = self.fusion([
                 non_text_embeddings, 
                 text_embeddings
@@ -328,18 +345,47 @@ class MultiSenseModel(nn.Module):
             constant_attention_masks = torch.full((attention_masks.shape[0], non_text_len), 1).to(device)
             attention_masks = torch.cat([constant_attention_masks, attention_masks], dim=1)
 
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    inputs_embeds=fused_embeddings, 
-                    attention_mask=attention_masks,
-                    max_length=15, 
-                )
-                
-                decoded_texts = self.tokenizer.batch_decode(
-                    outputs, 
-                    skip_special_tokens=True
-                )
-            return decoded_texts
+
+            if self.mode == 'seq2seq': 
+
+                with torch.no_grad():
+                    outputs = self.model.generate(
+                        inputs_embeds=fused_embeddings, 
+                        attention_mask=attention_masks,
+                        max_length=15, 
+                    )
+                    
+                    decoded_texts = self.tokenizer.batch_decode(
+                        outputs, 
+                        skip_special_tokens=True
+                    )
+
+                    prediction = decoded_texts
+            else:
+
+                with torch.no_grad():
+
+                    # Pass inputs through the model
+                    outputs = self.model(
+                        inputs_embeds=fused_embeddings, 
+                        attention_mask=attention_masks, 
+                        return_dict=True
+                    )
+
+                    # Using the last hidden state for regression or classification
+                    last_hidden_state = outputs.logits[:, -1]  
+
+                    # Pass through the output layer
+                    output = self.output_layer(last_hidden_state)  
+                    
+                    # If regression, output is already in the desired format
+                    # If classification, apply softmax or log_softmax to get probabilities
+                    if self.task_type == 'classification':
+                        output = torch.nn.functional.softmax(output, dim=1)
+
+                    prediction = output
+            
+            return prediction
             
     def fusion(self, multimodal_embeddings):
         return torch.cat(multimodal_embeddings, dim=1)
@@ -399,24 +445,23 @@ def train(data, run_name, dataset_name, run_id):
     
     # Creating datasets
     if OVERFIT:
-        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, nrows=50, data_split=[run_id])
+        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, nrows=150, data_split=[run_id], pred_mode=PRED_MODE)
         val_dataset = train_dataset
         test_dataset = train_dataset
     else:
-        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id])
-        val_dataset = MMIDataset(feature_list=non_text_features, data_type='validation', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id])
-        test_dataset = MMIDataset(feature_list=non_text_features, data_type='test', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id])
+        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id], pred_mode=PRED_MODE)
+        val_dataset = MMIDataset(feature_list=non_text_features, data_type='validation', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id], pred_mode=PRED_MODE)
+        test_dataset = MMIDataset(feature_list=non_text_features, data_type='test', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id], pred_mode=PRED_MODE)
         
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=custom_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
     
-    
     # Example usage of data_loader in a training loop
-    for batch in test_loader:
+    for batch in train_loader:
         features, labels, dataset_names, task_types = batch
         print('FEATURES IN LOADER: ', features.keys())
-        # print(len(features['text'][0]), len(labels[0]))
+        print(features['text'], labels)
         # for name, feature in features.items():
         #     print(name, feature[0])
         break
@@ -430,15 +475,17 @@ def train(data, run_name, dataset_name, run_id):
     if 'umeme' in dataset_name:
         MODALITY_FEATURE_SIZE['acoustic'] = 52
     
-    model = MultiSenseModel(LM_VERSION, non_text_features, tokenizer, feature_modes=non_text_feature_modes, feature_dims=MODALITY_FEATURE_SIZE).to(device)
+    model = MultiSenseModel(LM_VERSION, non_text_features, tokenizer, feature_modes=non_text_feature_modes, feature_dims=MODALITY_FEATURE_SIZE, pred_mode=PRED_MODE).to(device)
     model.float() 
 
     print("Prepared model")
     gpu_monitor()
         
-    optimizer = prepare_optimizer(model, LR)
+    optimizer = prepare_optimizer(model, LR, PRED_MODE)
+
     train_model(model, train_loader, val_loader, test_loader, optimizer, device, num_epochs, checkpoint_path = f'checkpoints/{dataset_name}/', run_name = run_name)
-    
+    # evaluate_model(model, test_loader, device, None, run_name)  # -1 indicates test evaluation
+
 if __name__ == "__main__":
     
     torch.cuda.empty_cache()
@@ -449,17 +496,17 @@ if __name__ == "__main__":
     gpu_monitor()
     
     data = None
-    for seed in seeds:
-        torch.manual_seed(seed)
-        for i in range(num_runs):
 
-            # dataset_name = 'sewa_valence'
-            # dataset_name = 'recola_valence'
-            for dataset_name in ALL_DATASETS:
+    for dataset_name in ALL_DATASETS:
+
+        for seed in seeds:
+            torch.manual_seed(seed)
+
+            for i in range(num_runs):
                 
                 # wandb setup
                 project_name = dataset_name
-                run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}_{seed}_{i}'   
+                run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}_{seed}_{i}_{PRED_MODE}'   
                 if OVERFIT:
                     run_name += '_overfit'
                 

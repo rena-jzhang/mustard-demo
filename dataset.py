@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 import pandas as pd
+from sklearn.preprocessing import OneHotEncoder
+import numpy as np
 
 from info import *
 import os
@@ -18,14 +20,14 @@ class MMIDataset(Dataset):
         dataset_rootdir: str = '../meta/',
         data_split=[0], 
         nrows: int = -1, 
+        pred_mode: str = 'seq2seq',
         filter_dim_coordination=False, 
         sample_frac: float = 1.0,
         slice_range: tuple = None
     ):
         
         eps = 1e-5
-        # assert dataset_name in ALL_DATASETS
-        # assert data_type in ALL_DATA_TYPES
+
         self.dataset_name = dataset_name
         print(f"Loading Dataset {dataset_name},", end=' ')
 
@@ -34,12 +36,6 @@ class MMIDataset(Dataset):
         # elif dataset_name in ['iemocap_arousal', 'iemocap_valence']:
         #     dataset_rootdir = dataset_rootdir.replace('meta', 'meta_iemocap')
 
-        # Dynamically identify files that match the pattern
-        # file_pattern = f'_{data_type}.csv'
-        # all_files = os.listdir(dataset_rootdir)
-        # dataset_files = [file for file in all_files if file.startswith(dataset_name) and file.endswith(file_pattern)]
-        # print(dataset_files)
-        # Read the identified files into DataFrame(s)
         dataset_files = [dataset_rootdir + dataset_name + f'_{idx}_{data_type}.csv'
                    for idx in data_split]
                    
@@ -50,9 +46,6 @@ class MMIDataset(Dataset):
                   
         df = pd.concat(df_list, ignore_index=True)
         
-        # df = df[slice_range[0]:slice_range[1]] if slice_range is not None else df
-        # df = df.sample(frac=sample_frac, random_state=1706)
-
         features = [ft for ft in df.columns if not (ft.startswith('meta') or ft == 'y' or ft == 'sentence')]
         data = df[features]
         data = data.dropna(axis='columns')
@@ -77,20 +70,34 @@ class MMIDataset(Dataset):
         label = list(df['y'])
         
         self.task_type = DATASET_TASK[dataset_name]
-                
-        if self.task_type == 'C':
-            self.label = label
+        
+        if pred_mode == 'seq2seq':
+            if self.task_type == 'C':
+                self.label = label
+            else:
+                self.label = [f"{float(number):.2f}" for number in label]
         else:
-            self.label = [f"{float(number):.2f}" for number in label]
-            
+            if self.task_type == 'C':
+                self.label = [int(y) for y in df['y']]
+                int_array = np.array(self.label).reshape(-1, 1)
+
+                encoder = OneHotEncoder(sparse=False)
+                self.label = encoder.fit_transform(int_array)
+            else:
+                self.label = [float(y) for y in df['y']]
+                self.label = torch.tensor(self.label).unsqueeze(1) 
+                print(self.label.shape)
+
         self.dataset_size = len(self.label)
         print(f"size: {self.dataset_size}")
         
         self.all_modalities.append('text')
         task_instruction = DATASET_INSTRUCTION[dataset_name] 
-        # self.data['text'] = [task_instruction] * self.dataset_size
-        self.data['text'] = [ sent + " " + task_instruction for sent in list(df['sentence'])]
-
+        
+        if 'sentence' in df.columns:
+            self.data['text'] = [sent + ". Task: Given the input, " + task_instruction for sent in list(df['sentence'])]
+        else:
+            self.data['text'] = ["Task: Given the input, " + task_instruction] * self.dataset_size
         print()
 
     def __len__(self):

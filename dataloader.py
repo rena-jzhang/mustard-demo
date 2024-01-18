@@ -270,6 +270,24 @@ class MOSEI(MOSI):
         )
 
 
+class UMEME(MOSI):
+    def get_subjects(
+        self,
+        name: Literal["training", "validation", "test"],
+        fold: Literal[0, 1, 2, 3, 4],
+        dimension: str,
+    ) -> list[str]:
+        # speaker-split
+        mapping = self.features.groupby("meta_id")["name"].unique()
+        names = self.features["name"]
+        self.features["name"] = self.features["meta_id"]
+        subjects = super().get_subjects(name, fold, dimension)
+        subjects = sum([mapping[session].tolist() for session in subjects], [])
+        self.features["name"] = names
+        return subjects
+
+
+
 class IEMOCAP(MOSI):
     def get_subjects(
         self,
@@ -325,22 +343,6 @@ class TPOT(MOSI):
             batch["y"][0] = batch["y"][0].astype(int)
         return loader
 
-
-class UMEME(MOSI):
-    def get_subjects(
-        self,
-        name: Literal["training", "validation", "test"],
-        fold: Literal[0, 1, 2, 3, 4],
-        dimension: str,
-    ) -> list[str]:
-        # speaker-split
-        mapping = self.features.groupby("meta_id")["name"].unique()
-        names = self.features["name"]
-        self.features["name"] = self.features["meta_id"]
-        subjects = super().get_subjects(name, fold, dimension)
-        subjects = sum([mapping[session].tolist() for session in subjects], [])
-        self.features["name"] = names
-        return subjects
 
 class VREED:
     def __init__(self) -> None:
@@ -521,5 +523,5 @@ def get_partitions(dimension: str, batch_size: int) -> dict[int, dict[str, DataL
             name: loader.get_loader(name, fold, dimension, batch_size)
             for name in ("training", "test", "validation")
         }
-        for fold in range(1)
+        for fold in range(5)
     }

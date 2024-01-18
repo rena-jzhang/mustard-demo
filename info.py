@@ -56,13 +56,13 @@ SUB_MODALITY_SET = [
 ] + ALL_MODALITY_PAIRS + ALL_MODALITY_TRIPLETS + ALL_MODALITY_QUADRUAPLETS
 
 ALL_DATASETS = [
-                'umeme_arousal', 
+                # 'umeme_arousal', 
                 # 'vreed_av',
 
                 # 'iemocap_valence', 
                 # 'iemocap_arousal',
-                # 'recola_valence', 
-                # 'recola_arousal', 
+                'recola_valence', 
+                'recola_arousal', 
                 # 'sewa_valence', 
                 # 'sewa_arousal', 
                 # 'mosi_sentiment',

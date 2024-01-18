@@ -8,7 +8,41 @@ from scipy.stats import pearsonr
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error
 from tqdm import tqdm
 import wandb
+import torch.nn as nn
 
+def correlation(
+    y_true: torch.tensor,
+    y_hat: torch.tensor,
+) -> torch.tensor:
+    y_true = y_true.reshape(-1)
+    y_hat = y_hat.reshape(-1)
+    correlation_matrix = torch.corrcoef(torch.stack([y_true, y_hat]))
+    correlation_coefficient = correlation_matrix[0, 1]
+    return correlation_coefficient
+
+def correlation_loss(
+    y_true: torch.Tensor,
+    y_hat: torch.Tensor,
+) -> torch.tensor:
+    return torch.tensor(1) - correlation(y_true, y_hat)
+
+def cross_entropy_loss(
+    y_true: torch.Tensor,
+    y_hat: torch.Tensor,
+) -> torch.tensor:
+    criterion = nn.BCEWithLogitsLoss()
+    return criterion(y_hat, y_true)
+
+def get_loss_function(loss_fn_name: str, alpha: float = 0.9):
+ 
+    if loss_fn_name == 'ce':
+        return cross_entropy_loss
+    elif loss_fn_name == 'mae':
+        return nn.L1Loss()
+    elif loss_fn_name == 'mse':
+        return nn.MSELoss()
+    elif loss_fn_name == 'mae+corr':
+        return lambda x, y: alpha * nn.L1Loss()(x, y) + (1 - alpha) * correlation_loss(x, y)
 
 def calculate_metrics(true_values, predicted_values):
     """
@@ -62,11 +96,15 @@ def calculate_metrics(true_values, predicted_values):
     return ccc, rmse, pcc
 
 def evaluate_model(model, test_loader, device, epoch = None, run_name = None):
+
+    return evaluate_model_pred_head(model, test_loader, device, task_type='regression', epoch=epoch, run_name=run_name)
     model.eval() 
     predictions = []
     actuals = []
     result_folder_name = None
+
     with torch.no_grad():
+
         progress_bar = tqdm(test_loader, desc='Evaluating', unit='batch')
 
         for batch in progress_bar:
@@ -127,6 +165,83 @@ def save_checkpoint(model, optimizer, epoch, filename):
         'optimizer': optimizer.state_dict()
     }
     torch.save(state, filename)
+
+def evaluate_model_pred_head(model, test_loader, device, task_type='regression', epoch=None, run_name=None):
+    
+    model.eval() 
+    predictions = []
+    actuals = []
+    result_folder_name = None
+
+    with torch.no_grad():
+
+        progress_bar = tqdm(test_loader, desc='Evaluating', unit='batch')
+
+        for batch in progress_bar:
+            features, labels, dataset_name, _ = batch
+            result_folder_name = dataset_name[0]
+            predicted = model(features, device)
+            if task_type == 'regression':
+                predictions.extend(predicted.flatten().tolist())            
+                actuals.extend(labels.tolist())    
+            else:
+                predictions.extend(predicted)            
+                actuals.extend(labels)   
+
+    # Calculate accuracy, precision, recall, and F1 score
+
+    print(predictions[:3])
+    print(actuals[:3])
+
+    # TODO
+    if task_type == 'classification':
+
+        accuracy = accuracy_score(actuals, predictions)
+        precision = precision_score(actuals, predictions, average='macro')
+        recall = recall_score(actuals, predictions, average='macro')
+        f1 = f1_score(actuals, predictions, average='macro')
+        
+        print(f'Test Accuracy: {accuracy:.4f}')
+        print(f'Precision: {precision:.4f}')
+        print(f'Recall: {recall:.4f}')
+        print(f'F1 Score: {f1:.4f}')
+        
+        wandb.log({
+        "eval_accuracy": accuracy, 
+        "eval_precision": precision, 
+        "eval_recall": recall, 
+        "eval_f1": f1
+    })
+
+    elif task_type == 'regression':
+
+        ccc, rmse, pcc = calculate_metrics(actuals, predictions)
+
+        print(f'CCC: {ccc:.4f}')
+        print(f'RMSE: {rmse:.4f}')
+        print(f'PCC: {pcc:.4f}')
+    
+        wandb.log({
+            "eval_ccc": ccc,
+            "eval_rmse": rmse,
+            "eval_pcc": pcc
+        })
+        
+    # Save predictions and actuals to a file
+    folder_name = f"results/{result_folder_name}/{run_name}/"
+    
+    if not os.path.exists(folder_name):
+        os.makedirs(folder_name)
+    if epoch is not None:
+        file_name = os.path.join(folder_name, f'predictions_actuals_{epoch}.csv')
+    else:
+        file_name = os.path.join(folder_name, 'predictions_actuals.csv')
+
+    with open(file_name, 'w', newline='', encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Prediction', 'Actual'])
+        for pred, act in zip(predictions, actuals):
+            writer.writerow([f'{pred:.4f}', f'{act:.4f}'])
     
 def train_model(model, train_loader, val_loader, test_loader, optimizer, device, num_epochs, checkpoint_path, run_name):
     
@@ -193,17 +308,25 @@ def proprocess_output(train_output, test_output, class_mapping):
     test_output = [class_mapping[i] for i in test_output]
     return train_output, test_output
 
-def prepare_optimizer(model, lr):
+def prepare_optimizer(model, lr, pred_mode):
     trainable_params = []
     for param in model.model.parameters():
         if param.requires_grad:
             trainable_params.append(param)
+            
     for feature_type in model.modules.keys():
         linear_projection = model.modules[feature_type]['linear_projection']
         if linear_projection is not None:
             for param in linear_projection.parameters():
                 if param.requires_grad:
                     trainable_params.append(param)
+
+    if pred_mode == 'pred_head':
+        linear_projection = model.output_layer
+        for param in linear_projection.parameters():
+            if param.requires_grad:
+                trainable_params.append(param)
+
     optimizer = torch.optim.Adam(trainable_params, lr=lr)
     return optimizer
 
