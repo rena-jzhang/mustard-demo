@@ -10,21 +10,39 @@ from tqdm import tqdm
 import wandb
 import torch.nn as nn
 
-def correlation(
-    y_true: torch.tensor,
-    y_hat: torch.tensor,
-) -> torch.tensor:
+def correlation(y_true: torch.Tensor, y_hat: torch.Tensor) -> torch.Tensor:
     y_true = y_true.reshape(-1)
     y_hat = y_hat.reshape(-1)
+    if torch.std(y_true) == 0 or torch.std(y_hat) == 0:
+        return torch.tensor(0.0)
     correlation_matrix = torch.corrcoef(torch.stack([y_true, y_hat]))
     correlation_coefficient = correlation_matrix[0, 1]
     return correlation_coefficient
 
-def correlation_loss(
-    y_true: torch.Tensor,
-    y_hat: torch.Tensor,
-) -> torch.tensor:
-    return torch.tensor(1) - correlation(y_true, y_hat)
+def correlation_loss(y_true: torch.Tensor, y_hat: torch.Tensor) -> torch.Tensor:
+    corr = correlation(y_true, y_hat)
+    return torch.tensor(1.0) - corr
+
+def concordance_correlation_coefficient(y_true: torch.Tensor, y_hat: torch.Tensor) -> torch.Tensor:
+    mean_y = torch.mean(y_true, dim=0)
+    mean_y_hat = torch.mean(y_hat, dim=0)
+    y_mean = y_true - mean_y
+    y_hat_mean = y_hat - mean_y_hat
+    cov = torch.mean(y_mean * y_hat_mean, dim=0)
+    var = torch.var(y_true, dim=0, unbiased=False) + torch.var(y_hat, dim=0, unbiased=False)
+    mse = (mean_y - mean_y_hat) ** 2
+
+    # Check for division by zero
+    denominator = var + mse
+    if torch.all(denominator == 0):
+        return torch.tensor(0.0)
+    
+    ccc = (2 * cov) / denominator
+    return torch.mean(ccc)
+
+def ccc_loss(y_true: torch.Tensor, y_hat: torch.Tensor) -> torch.Tensor:
+    ccc = concordance_correlation_coefficient(y_true, y_hat)
+    return torch.tensor(1.0) - ccc
 
 def cross_entropy_loss(
     y_true: torch.Tensor,
@@ -32,6 +50,21 @@ def cross_entropy_loss(
 ) -> torch.tensor:
     criterion = nn.BCEWithLogitsLoss()
     return criterion(y_hat, y_true)
+
+def loss_and_metric_for_dataset(dataset_name: str):
+    if dataset_name in ['mosi_sentiment', 'mosei_happiness', 'mosei_sentiment']:
+        return 'mae+corr', ['mae', 'corr']
+    elif dataset_name in ['vreed_av']:
+        return 'ce', ['acc', 'wf1']
+    elif dataset_name in ['sewa_arousal', 'sewa_valence', 'umeme_arousal']:
+        return 'mae+ccc', ['mae', 'ccc']
+    elif dataset_name in ['recola_arousal', 'recola_valence']:
+        return 'mae+ccc', ['mae', 'ccc']
+    elif dataset_name in ['iemocap_valence', 'iemocap_arousal']:
+        return 'mae+ccc', ['mae', 'ccc']
+    else:
+        raise ValueError(f"Wrong dataset name: {dataset_name}")
+
 
 def get_loss_function(loss_fn_name: str, alpha: float = 0.9):
  
@@ -43,6 +76,8 @@ def get_loss_function(loss_fn_name: str, alpha: float = 0.9):
         return nn.MSELoss()
     elif loss_fn_name == 'mae+corr':
         return lambda x, y: alpha * nn.L1Loss()(x, y) + (1 - alpha) * correlation_loss(x, y)
+    elif loss_fn_name == 'mae+ccc':
+        return lambda x, y: alpha * nn.L1Loss()(x, y) + (1 - alpha) * ccc_loss(x, y)
 
 def calculate_metrics(true_values, predicted_values):
     """
@@ -72,10 +107,7 @@ def calculate_metrics(true_values, predicted_values):
         pearson_corr = 0
         ccc = 0
     else:
-        # Calculate Pearson correlation
         pearson_corr, _ = pearsonr(true_values, predicted_values)
-
-        # Handle potential division by zero in CCC calculation
         denominator = (var_true + var_predicted + (mean_true - mean_predicted) ** 2)
         if denominator == 0:
             ccc = 0
@@ -84,13 +116,10 @@ def calculate_metrics(true_values, predicted_values):
 
     # Check for RMSE
     if len(true_values) == 0 or len(predicted_values) == 0 or len(true_values) != len(predicted_values):
-        # Handle edge case for empty arrays or arrays of different lengths
         rmse = 0
     else:
-        # Calculate Root Mean Squared Error
         rmse = np.sqrt(mean_squared_error(true_values, predicted_values))
 
-    # PCC is the Pearson Correlation Coefficient
     pcc = pearson_corr
 
     return ccc, rmse, pcc
@@ -189,9 +218,9 @@ def evaluate_model_pred_head(model, test_loader, device, task_type='regression',
                 actuals.extend(labels)   
 
     # Calculate accuracy, precision, recall, and F1 score
-
-    print(predictions[:3])
-    print(actuals[:3])
+    
+    # print(predictions[:3])
+    # print(actuals[:3])
 
     # TODO
     if task_type == 'classification':
@@ -243,32 +272,60 @@ def evaluate_model_pred_head(model, test_loader, device, task_type='regression',
         for pred, act in zip(predictions, actuals):
             writer.writerow([f'{pred:.4f}', f'{act:.4f}'])
     
-def train_model(model, train_loader, val_loader, test_loader, optimizer, device, num_epochs, checkpoint_path, run_name):
+def train_model(model, train_loaders, val_loader, test_loader, optimizer, device, num_epochs, checkpoint_path, run_name):
     
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 
     best_val_loss = float('inf')
-    best_model_path = os.path.join(checkpoint_path, 'best_model.pth')
+    best_model_path = os.path.join(checkpoint_path, run_name + '.pth')
 
     for epoch in range(num_epochs):
+
         # Training phase
         model.train()
         total_train_loss = 0
-        train_progress_bar = tqdm(train_loader, desc=f'Train Epoch {epoch+1}/{num_epochs}', unit='batch')
 
-        for batch in train_progress_bar:
-            features, labels, dataset_names, task_types = batch
+        total_batches = 0
+
+        zipped_loaders = zip(*[iter(loader) for loader in train_loaders])
+        min_len = min(len(loader) for loader in train_loaders)
+        train_progress_bar = tqdm(zipped_loaders, total=min_len, desc=f'Train Epoch {epoch+1}/{num_epochs}', unit='batch')
+
+        for batches in train_progress_bar:
             optimizer.zero_grad()
-            loss = model(features, device, labels)
-            total_train_loss += loss.item()
-            loss.backward()
-            optimizer.step()
+            epoch_loss = 0
+            for batch in batches:
+                # print(batch)
+                # print('done batch')
+                features, labels, dataset_names, task_types = batch 
+                loss = model(features, device, labels)  # You may need to adjust this call
+                epoch_loss += loss
             
-            del features, labels
-            torch.cuda.empty_cache()
-            train_progress_bar.set_postfix({'loss': total_train_loss / len(train_progress_bar)})
+            epoch_loss.backward()  # Accumulate gradients for each task's batch before optimizer step
+            optimizer.step()
+            total_train_loss += epoch_loss.item()
+            total_batches += 1
 
-        average_train_loss = total_train_loss / len(train_loader)
+            torch.cuda.empty_cache()
+            train_progress_bar.set_postfix({'loss': total_train_loss / total_batches})
+
+        average_train_loss = total_train_loss / total_batches
+
+        # train_progress_bar = tqdm(train_loader, desc=f'Train Epoch {epoch+1}/{num_epochs}', unit='batch')
+
+        # for batch in train_progress_bar:
+        #     features, labels, dataset_names, task_types = batch
+        #     optimizer.zero_grad()
+        #     loss = model(features, device, labels)
+        #     total_train_loss += loss.item()
+        #     loss.backward()
+        #     optimizer.step()
+            
+        #     del features, labels
+        #     torch.cuda.empty_cache()
+        #     train_progress_bar.set_postfix({'loss': total_train_loss / len(train_progress_bar)})
+
+        # average_train_loss = total_train_loss / len(train_loader)
         print(f'Epoch [{epoch+1}/{num_epochs}], Training Loss: {average_train_loss:.4f}')
         wandb.log({"epoch": epoch, "train_loss": average_train_loss, "lr": optimizer.param_groups[0]['lr']})
 

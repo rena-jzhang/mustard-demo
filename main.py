@@ -10,7 +10,7 @@ from transformers import T5ForConditionalGeneration, T5Tokenizer, AutoModelForCa
 from transformers import LlamaForCausalLM, LlamaTokenizer
 
 from config import CONFIG_BY_KEY
-from data_loader import DataPreper, DataHelper
+# from data_loader import DataPreper, DataHelper
 from utils import *
 from mmidataset import MMDataset, custom_collate_fn
 from torch.nn.utils.rnn import pad_sequence
@@ -21,54 +21,55 @@ import wandb
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# dataset_rootdir = '/results/twoertwe/meta/'  # Path to your dataset directory
-dataset_rootdir = '/work/jingyiz4/new_cleaned_data/'
-
 # LM_VERSION = 'google/flan-t5-xxl'
 # LM_VERSION = 't5-small'
-# LM_VERSION = 'gpt2'
+LM_VERSION = 'gpt2'
 # LM_VERSION = '../llama/llama-2-7b-hf'
 # LM_VERSION = 'llama-2-7b-hf'
-LM_VERSION = 'meta-llama/Llama-2-7b-hf'
 # LM_VERSION = '../web-act/llm_ft/Mistral-7B-Instruct-v0.1'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-num_epochs = 15
+num_epochs = 10
 seeds = [
-    42, 
+    # 42, 
     2023, 
     2024
     ]
-num_runs = 2
+num_runs = 3
 
 FROZEN_LLM = False
+if FROZEN_LLM:
+    LR = 1e-3
+else:
+    LR = 1e-4
 
 # special settings
 OVERFIT = False
 TEXT_ONLY = False
 NO_TEXT = False
-
-if FROZEN_LLM:
-    LR = 1e-3
-else:
-    LR = 1e-4
-    # LR = 1e-3
+NORMALIZED= False
     
-BATCH_SIZE = 2
+BATCH_SIZE = 8
 TEST_BATCH_SIZE = 64
 
-# PRED_MODE = 'seq2seq' 
+PRED_MODE = 'seq2seq' 
+# PRED_MODE = 'pred_head' 
 
-PRED_MODE = 'pred_head' 
+# LOSS = 'mse'
+LOSS = 'ce'
+
+MULTITASK = True
 
 class MultiSenseModel(nn.Module):
-    def __init__(self, model_name, non_text_feature_types, tokenizer, feature_modes, feature_dims, pred_mode, task_type = 'regression'):
+    def __init__(self, model_name, non_text_feature_types, tokenizer, feature_modes, feature_dims, pred_mode, task_type = 'regression', loss_fn_name = 'mae+ccc'):
         super(MultiSenseModel, self).__init__()
 
-        self.feature_types = non_text_feature_types
+        self.loss_fn_name = loss_fn_name
         
-        self.feature_modes = feature_modes 
+        self.feature_types = non_text_feature_types
+        # self.feature_modes = feature_modes 
+        
         self.tokenizer = tokenizer
 
         self.model = self.get_llm(model_name, frozen = FROZEN_LLM) 
@@ -144,7 +145,6 @@ class MultiSenseModel(nn.Module):
                 param.requires_grad = False
         return video_encoder
 
-
     def tokenize(self, text_input):
         return self.tokenizer(text_input, return_tensors="pt", padding=True, truncation=True).input_ids.to(device)
 
@@ -158,7 +158,8 @@ class MultiSenseModel(nn.Module):
             answer = labels[idx] if labels else None
 
             question_tokens = self.tokenizer.encode(
-                self.tokenizer.bos_token + question + self.tokenizer.eos_token, 
+                # self.tokenizer.bos_token + 
+                question + self.tokenizer.eos_token, 
                 add_special_tokens=False
             )
             
@@ -221,14 +222,17 @@ class MultiSenseModel(nn.Module):
             
         return input_ids, label_ids, attention_masks
 
-
     def forward(self, features, device, labels=None):
         
         # Process non-text features
         feature_inputs = []
-        for i, feature_type in enumerate(self.feature_types):
+        for i, feature_type in enumerate(features.keys()):
+            if feature_type == 'text': continue
             non_text_feature = features[feature_type].to(device)
-            mode = self.feature_modes.get(feature_type)
+
+            mode = 'precomputed'
+            # self.feature_modes.get(feature_type)
+            
             if mode == 'raw':
                 encoder = self.modules[feature_type]['encoder']
 
@@ -251,8 +255,9 @@ class MultiSenseModel(nn.Module):
         text_input = features['text']
 
         if labels is not None:
-            labels = labels.to(device)
-            
+            if torch.is_tensor(labels):
+                labels = labels.to(device)
+        
             if self.mode == 'seq2seq':
                 input_ids, label_ids, attention_masks = self.patch_data(
                     text_input=text_input, 
@@ -271,6 +276,10 @@ class MultiSenseModel(nn.Module):
                     text_input=text_input, 
                     labels=None
                 )
+
+                non_text_len = non_text_embeddings.shape[1]
+                last_hidden_state_idx = [non_text_len + len(i) - 1 for i in input_ids]
+
                 input_ids, _, attention_masks = self.padding(
                     input_ids=input_ids, 
                     attention_masks=attention_masks
@@ -306,19 +315,31 @@ class MultiSenseModel(nn.Module):
                     attention_mask=attention_masks, 
                     return_dict=True
                 )
+                
+                last_hidden_states = []
+                for i in range(outputs.logits.shape[0]):
+                    last_hidden_state = outputs.logits[i, last_hidden_state_idx[i]]
+                    last_hidden_states.append(last_hidden_state)
 
-                last_hidden_state = outputs.logits[:, -1]  
+                # last_hidden_state = outputs.logits[:, last_hidden_state_idx]
+                last_hidden_states = torch.stack(last_hidden_states)
+                # print(last_hidden_states.shape)
 
-                output = self.output_layer(last_hidden_state)  # Shape: [batch_size, 1]
+                output = self.output_layer(last_hidden_states)  # Shape: [batch_size, 1]
 
                 if self.task_type == 'regression':
                     output = output.flatten()
-                    # loss_fct = get_loss_function('mae+corr') 
-                    loss_fct = get_loss_function('mse') 
-
+                    loss_fct = get_loss_function(loss_fn_name = self.loss_fn_name) 
                 else:
                     loss_fct = get_loss_function('ce')
 
+                # # Print data types
+                # print("Data type of 'labels':", labels.dtype)
+                # print("Data type of 'output':", output.dtype)     
+                # # Check tensor size
+                # print("Size of the tensor:", labels.size())
+                # print("Size of the tensor:", output.size())
+                    
                 loss = loss_fct(labels, output)
 
             return loss
@@ -399,11 +420,147 @@ class MultiSenseModel(nn.Module):
         print('self.modules[audio][linear_projection].bias: ', self.modules["audio"]["linear_projection"].bias[:10])
 
 
-def train(data, run_name, dataset_name, run_id):
+def get_dataset_metadata(dataset_name):
+    dataset_rootdir = '/results/twoertwe/meta/' 
+    if dataset_name in ['umeme_arousal, recola_valence', 'recola_arousal']:
+        dataset_rootdir = '/work/jingyiz4/new_cleaned_data/'
+       
+    non_text_features = DATASET_MODALITY[dataset_name]
+    
+    if 'language' in non_text_features:
+        non_text_features.remove('language')
+            
+    print('NON TEXT FEATURES: ', non_text_features)
+        
+    non_text_feature_modes = dict([(feature_type, 'precomputed') for feature_type in non_text_features])
+            
+    return dataset_rootdir, non_text_features, non_text_feature_modes
+
+def train(run_name, dataset_name, run_id, loss_fn_name):
+
     if 'llama' in LM_VERSION:
         tokenizer = LlamaTokenizer.from_pretrained(LM_VERSION)
     else:
         tokenizer = AutoTokenizer.from_pretrained(LM_VERSION)
+
+    # get the metadata for the dataset_name
+    dataset_rootdir, non_text_features, non_text_feature_modes = get_dataset_metadata(dataset_name)
+
+    # Creating datasets -> train_dataset, val_dataset, test
+    if OVERFIT:
+        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, nrows=150, data_split=[run_id], pred_mode=PRED_MODE)
+        val_dataset = train_dataset
+        test_dataset = train_dataset
+    else:
+        if not MULTITASK:
+            train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id], pred_mode=PRED_MODE)
+        else:
+            train_datasets = {}
+            for sub_dataset_name in  ALL_PRETRAIN_DATASETS:
+                dataset_rootdir, sub_ds_non_text_features, _ = get_dataset_metadata(sub_dataset_name)
+                train_datasets[sub_dataset_name] = MMIDataset(feature_list=sub_ds_non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id], pred_mode=PRED_MODE)
+                
+        val_dataset = MMIDataset(feature_list=non_text_features, data_type='validation', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id], pred_mode=PRED_MODE)
+        test_dataset = MMIDataset(feature_list=non_text_features, data_type='test', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id], pred_mode=PRED_MODE)
+        
+    if not MULTITASK:
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=custom_collate_fn)
+        train_loaders = {dataset_name: train_loader}
+    else:
+        train_loaders = {
+            sub_dataset_name: DataLoader(dataset, 
+                                 batch_size=DATASET_TRAIN_BS[sub_dataset_name],
+                                 shuffle=True, 
+                                 collate_fn=custom_collate_fn)
+            for sub_dataset_name, dataset in train_datasets.items()
+        }
+        
+
+    val_loader = DataLoader(val_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
+    
+    # Example usage of data_loader in a training loop
+    for batch in val_loader:
+        features, labels, dataset_names, task_types = batch
+        for name, feature in features.items():
+            print(name, feature[0])
+        print(labels)
+        break
+
+    # prepare model
+    MODALITY_FEATURE_SIZE = {
+        'vision': 125, 'acoustic': 140, 'language': 457,
+        'eda': 62, 'ecg': 54, 'mocap': 330, 
+    }
+    if 'umeme' in dataset_name:
+        MODALITY_FEATURE_SIZE['acoustic'] = 52
+
+    all_non_text_features = ALL_MODALITIES
+    if 'language' in all_non_text_features:
+        all_non_text_features.remove('language')
+
+    model = MultiSenseModel(LM_VERSION, all_non_text_features, tokenizer, feature_modes=non_text_feature_modes, feature_dims=MODALITY_FEATURE_SIZE, pred_mode=PRED_MODE, loss_fn_name = loss_fn_name).to(device)
+    model.float() 
+    print("Prepared model")
+    gpu_monitor()
+
+    # config model param update
+    optimizer = prepare_optimizer(model, LR, PRED_MODE)
+
+    train_model(model, train_loaders.values(), val_loader, test_loader, optimizer, device, num_epochs, checkpoint_path = f'checkpoints/{dataset_name}', run_name = run_name)
+    # evaluate_model(model, test_loader, device, None, run_name)  # -1 indicates test evaluation
+
+if __name__ == "__main__":
+    
+    torch.cuda.empty_cache()
+
+    config = CONFIG_BY_KEY["tav"]
+    
+    print("Before running")
+    gpu_monitor()
+    
+    data = None
+
+    for seed in seeds:
+
+        torch.manual_seed(seed)
+        for i in range(num_runs):
+            
+            for dataset_name in ALL_DATASETS:
+
+                # wandb setup
+                project_name = dataset_name
+                run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}_{seed}_{i}_{LOSS}_{PRED_MODE}'   
+                if OVERFIT:
+                    run_name += '_overfit'
+                
+                if not FROZEN_LLM:
+                    run_name += '_unfreeze'
+
+
+                if NORMALIZED:
+                    run_name += '_normalized'
+                    
+                if TEXT_ONLY:
+                    run_name += '_text-only'
+                else:
+                    if NO_TEXT:
+                        run_name += '_no-text'
+
+                wandb.init(project=project_name, name=run_name)
+                wandb.config = {
+
+                    "learning_rate": LR,
+                    "epochs": num_epochs,
+                    "batch_size": BATCH_SIZE
+                }
+
+                train(run_name, dataset_name = dataset_name, run_id = i, loss_fn_name = LOSS)
+            
+                wandb.finish()
+
+
+
         
     # Split
     # all_indices = data.get_all_indices_shuffled()
@@ -413,22 +570,7 @@ def train(data, run_name, dataset_name, run_id):
     # train_input, train_output = data.get_split(train_index)
     # test_input, test_output = data.get_split(test_index)
     
-        
-    non_text_features = DATASET_MODALITY[dataset_name]
-    
-    if 'language' in non_text_features:
-        non_text_features.remove('language')
-    
-    # if TEXT_ONLY:
-    #     non_text_features = ['language']
-    # else:
-    #     if NO_TEXT:
-    #         non_text_features.remove('language')
-            
-    print('NON TEXT FEATURES: ', non_text_features)
-        
-    non_text_feature_modes = dict([(feature_type, 'precomputed') for feature_type in non_text_features])
-            
+
     # if OVERFIT:
     #     train_dataset = MMDataset(train_input[:50], train_output[:50], non_text_feature_modes, dataset_name, task_type, tokenizer)
     # else:
@@ -443,89 +585,3 @@ def train(data, run_name, dataset_name, run_id):
         
     # test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, shuffle=False, num_workers=4, collate_fn = custom_collate_fn)
     
-    # Creating datasets
-    if OVERFIT:
-        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, nrows=150, data_split=[run_id], pred_mode=PRED_MODE)
-        val_dataset = train_dataset
-        test_dataset = train_dataset
-    else:
-        train_dataset = MMIDataset(feature_list=non_text_features, data_type='training', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id], pred_mode=PRED_MODE)
-        val_dataset = MMIDataset(feature_list=non_text_features, data_type='validation', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id], pred_mode=PRED_MODE)
-        test_dataset = MMIDataset(feature_list=non_text_features, data_type='test', dataset_name=dataset_name, dataset_rootdir=dataset_rootdir, data_split=[run_id], pred_mode=PRED_MODE)
-        
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=custom_collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
-    test_loader = DataLoader(test_dataset, batch_size=TEST_BATCH_SIZE, collate_fn=custom_collate_fn)
-    
-    # Example usage of data_loader in a training loop
-    for batch in train_loader:
-        features, labels, dataset_names, task_types = batch
-        print('FEATURES IN LOADER: ', features.keys())
-        print(features['text'], labels)
-        # for name, feature in features.items():
-        #     print(name, feature[0])
-        break
-    
-    # prepare model
-    MODALITY_FEATURE_SIZE = {
-        'vision': 125, 'acoustic': 140, 'language': 457,
-        'eda': 62, 'ecg': 54, 'mocap': 330, 
-    }
-    
-    if 'umeme' in dataset_name:
-        MODALITY_FEATURE_SIZE['acoustic'] = 52
-    
-    model = MultiSenseModel(LM_VERSION, non_text_features, tokenizer, feature_modes=non_text_feature_modes, feature_dims=MODALITY_FEATURE_SIZE, pred_mode=PRED_MODE).to(device)
-    model.float() 
-
-    print("Prepared model")
-    gpu_monitor()
-        
-    optimizer = prepare_optimizer(model, LR, PRED_MODE)
-
-    train_model(model, train_loader, val_loader, test_loader, optimizer, device, num_epochs, checkpoint_path = f'checkpoints/{dataset_name}/', run_name = run_name)
-    # evaluate_model(model, test_loader, device, None, run_name)  # -1 indicates test evaluation
-
-if __name__ == "__main__":
-    
-    torch.cuda.empty_cache()
-
-    config = CONFIG_BY_KEY["tav"]
-    
-    print("Before running")
-    gpu_monitor()
-    
-    data = None
-
-    for dataset_name in ALL_DATASETS:
-
-        for seed in seeds:
-            torch.manual_seed(seed)
-
-            for i in range(num_runs):
-                
-                # wandb setup
-                project_name = dataset_name
-                run_name = f'{LM_VERSION.split("/")[-1]}_nopretrain_{LR}_{BATCH_SIZE}_{seed}_{i}_{PRED_MODE}'   
-                if OVERFIT:
-                    run_name += '_overfit'
-                
-                if not FROZEN_LLM:
-                    run_name += '_unfreeze'
-                    
-                if TEXT_ONLY:
-                    run_name += '_text-only'
-                else:
-                    if NO_TEXT:
-                        run_name += '_no-text'
-
-                wandb.init(project=project_name, name=run_name)
-                wandb.config = {
-                    "learning_rate": LR,
-                    "epochs": num_epochs,
-                    "batch_size": BATCH_SIZE
-                }
-
-                train(data, run_name, dataset_name = dataset_name, run_id = i)
-            
-                wandb.finish()

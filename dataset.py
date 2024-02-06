@@ -21,7 +21,10 @@ class MMIDataset(Dataset):
         data_split=[0], 
         nrows: int = -1, 
         pred_mode: str = 'seq2seq',
-        filter_dim_coordination=False, 
+        data_mean: pd.Series = None,
+        data_std: pd.Series = None,
+        label_mean: float = None,
+        label_std: float = None,
         sample_frac: float = 1.0,
         slice_range: tuple = None
     ):
@@ -29,12 +32,8 @@ class MMIDataset(Dataset):
         eps = 1e-5
 
         self.dataset_name = dataset_name
-        print(f"Loading Dataset {dataset_name},", end=' ')
 
-        # if dataset_name in ['vreed_av']:
-        #     dataset_rootdir = dataset_rootdir.replace('meta', 'meta_vreed')
-        # elif dataset_name in ['iemocap_arousal', 'iemocap_valence']:
-        #     dataset_rootdir = dataset_rootdir.replace('meta', 'meta_iemocap')
+        print(f"Loading Dataset {dataset_name},", end=' ')
 
         dataset_files = [dataset_rootdir + dataset_name + f'_{idx}_{data_type}.csv'
                    for idx in data_split]
@@ -49,7 +48,10 @@ class MMIDataset(Dataset):
         features = [ft for ft in df.columns if not (ft.startswith('meta') or ft == 'y' or ft == 'sentence')]
         data = df[features]
         data = data.dropna(axis='columns')
-        data = (data - data.mean()) / (data.std() + eps)
+        self.data_mean = data.mean()
+        self.data_std = data.std()
+
+        data = (data - self.data_mean) / (self.data_std + eps)
 
         modalities = list(set([ft.split('_')[0] for ft in data.columns]))
 
@@ -68,9 +70,9 @@ class MMIDataset(Dataset):
             self.all_modalities.append(modality)
         
         label = list(df['y'])
-        
         self.task_type = DATASET_TASK[dataset_name]
         
+        # Create label
         if pred_mode == 'seq2seq':
             if self.task_type == 'C':
                 self.label = label
@@ -86,7 +88,10 @@ class MMIDataset(Dataset):
             else:
                 self.label = [float(y) for y in df['y']]
                 self.label = torch.tensor(self.label).unsqueeze(1) 
-                print(self.label.shape)
+                self.label_mean = self.label.mean()
+                self.label_std = self.label.std()
+
+                self.label = (self.label - self.label_mean) / (self.label_std + eps)
 
         self.dataset_size = len(self.label)
         print(f"size: {self.dataset_size}")
@@ -95,11 +100,11 @@ class MMIDataset(Dataset):
         task_instruction = DATASET_INSTRUCTION[dataset_name] 
         
         if 'sentence' in df.columns:
-            self.data['text'] = [sent + ". Task: Given the input, " + task_instruction for sent in list(df['sentence'])]
+            self.data['text'] = [sent + "<SEP> Task: Given the input, " + task_instruction for sent in list(df['sentence'])]
         else:
-            self.data['text'] = ["Task: Given the input, " + task_instruction] * self.dataset_size
+            self.data['text'] = ["<SEP> Task: Given the input, " + task_instruction] * self.dataset_size
+        
         print()
-
     def __len__(self):
         return self.dataset_size
 
@@ -111,6 +116,9 @@ class MMIDataset(Dataset):
             feature[mod] = self.data[mod][idx]
 
         return feature, label, self.dataset_name, self.task_type
+    
+    def return_stats(self):
+            return self.data_mean, self.data_std, self.label_mean, self.label_std 
 
 def get_datasets(args) -> Dict[str, MMIDataset]:
     assert not args.multitask
@@ -149,3 +157,5 @@ def get_multitask_datasets(args) -> Tuple[Dict[str, List[MMIDataset]], Dict[str,
         NotImplementedError()
 
     return multitask_training_datasets, multitask_validation_datasets
+
+

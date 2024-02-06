@@ -1,3 +1,49 @@
+ALL_DATASETS = [
+                'umeme_arousal', 
+                # 'vreed_av',
+
+                # 'iemocap_valence', 
+                # 'iemocap_arousal',
+                'recola_valence', 
+                'recola_arousal', 
+                # 'sewa_valence', 
+                # 'sewa_arousal', 
+                # 'mosi_sentiment',
+                # 'mosei_sentiment', 
+                # 'mosei_happiness',
+            ]
+
+
+ALL_PRETRAIN_DATASETS = [
+                'umeme_arousal', 
+                # 'vreed_av',
+
+                # 'iemocap_valence', 
+                # 'iemocap_arousal',
+                'recola_valence', 
+                'recola_arousal', 
+                # 'sewa_valence', 
+                # 'sewa_arousal', 
+                # 'mosi_sentiment',
+                # 'mosei_sentiment', 
+                # 'mosei_happiness',
+            ]
+
+DATASET_TRAIN_BS = {
+    'umeme_valence': 8,
+    'vreed_av': 'C',
+    'tpot_constructs': 'C',
+    'iemocap_valence': 'R',
+    'recola_valence': 6,
+    'mosi_sentiment': 'R',
+    'sewa_valence': 'R',
+    'umeme_arousal': 8,
+    'mosei_happiness': 'R',
+    'recola_arousal': 6,
+    'sewa_arousal': 'R',
+    'iemocap_arousal': 'R',
+    'mosei_sentiment': 'R',
+}
 ALL_DATA_TYPES = ['training', 'test', 'validation']
 ALL_METRICES = ['ccc', 'corr', 'mae', 'mse', 'wf1', 'acc']
 ALL_LOSS = ['ccc', 'corr', 'ce', 'mae', 'mse', 'wf1', 'acc', 'mae+corr', 'mae+corr+ce', 'mae+ccc', 'mae+corr+ccc']
@@ -13,8 +59,9 @@ MODALITY_HIDDEN_DIM = {
 }
 
 ALL_MODALITIES = [
-    'vision', 'acoustic', 'language', 
-    'eda', 'ecg', 
+    'vision', 'acoustic', 
+    'language', 
+    'eda', 'ecg'
 ]
 
 ALL_MODALITY_PAIRS = [
@@ -55,20 +102,6 @@ SUB_MODALITY_SET = [
     ['vision'], ['language'], ['acoustic'], ['mocap'], ['ecg'], ['eda'],
 ] + ALL_MODALITY_PAIRS + ALL_MODALITY_TRIPLETS + ALL_MODALITY_QUADRUAPLETS
 
-ALL_DATASETS = [
-                # 'umeme_arousal', 
-                # 'vreed_av',
-
-                # 'iemocap_valence', 
-                # 'iemocap_arousal',
-                'recola_valence', 
-                'recola_arousal', 
-                # 'sewa_valence', 
-                # 'sewa_arousal', 
-                # 'mosi_sentiment',
-                # 'mosei_sentiment', 
-                # 'mosei_happiness',
-            ]
 
 MODALITY_DATASET = {
     'vision': [

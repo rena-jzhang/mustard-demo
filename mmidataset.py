@@ -93,14 +93,16 @@ def custom_collate_fn(batch):
     for modality in modalities:
         
         features = [item[0][modality] for item in batch]
+        
         if modality not in ['text']:  # Add other modalities requiring padding here
             batched_data[modality] = pad_sequence(features, batch_first=True, padding_value=0)
         else:  
             # For modalities that don't need padding
             batched_data[modality] = features
 
+    # print(batch[0])
     # Process labels, dataset names, and task types
-    labels = torch.tensor([item[1] for item in batch])
+    labels = [item[1] for item in batch]
     dataset_names = [item[2] for item in batch]
     task_types = [item[3] for item in batch]
     
